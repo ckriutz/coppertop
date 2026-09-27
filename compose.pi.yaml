@@ -1,0 +1,46 @@
+# For the Raspberry Pi: runs the images published by GitHub Actions instead of building locally.
+#   docker compose -f compose.pi.yaml pull && docker compose -f compose.pi.yaml up -d
+# Pin a build with e.g. TRADER_TAG=42 (tags are each workflow's github.run_number).
+# Secrets come from the shell or ./.env: COPPERTOP_API_KEY, KRAKEN_API_KEY, KRAKEN_API_SECRET
+services:
+  api:
+    image: ghcr.io/${GHCR_OWNER:-ckriutz}/coppertop-api:${API_TAG:-latest}
+    environment:
+      Api__Key: ${COPPERTOP_API_KEY:-}
+    volumes:
+      - coppertop-data:/data
+    ports:
+      - "5057:8080"
+    restart: unless-stopped
+
+  trader:
+    image: ghcr.io/${GHCR_OWNER:-ckriutz}/coppertop-trader:${TRADER_TAG:-latest}
+    depends_on: [api]
+    environment:
+      CoppertopApi__BaseUrl: http://api:8080
+      CoppertopApi__ApiKey: ${COPPERTOP_API_KEY:-}
+      Trader__Mode: Paper
+      Kraken__ApiKey: ${KRAKEN_API_KEY:-}
+      Kraken__ApiSecret: ${KRAKEN_API_SECRET:-}
+    restart: unless-stopped
+
+  research:
+    image: ghcr.io/${GHCR_OWNER:-ckriutz}/coppertop-research:${RESEARCH_TAG:-latest}
+    depends_on: [api]
+    environment:
+      CoppertopApi__BaseUrl: http://api:8080
+      CoppertopApi__ApiKey: ${COPPERTOP_API_KEY:-}
+    restart: unless-stopped
+
+  web:
+    image: ghcr.io/${GHCR_OWNER:-ckriutz}/coppertop-web:${WEB_TAG:-latest}
+    depends_on: [api]
+    environment:
+      COPPERTOP_API_URL: http://api:8080
+      COPPERTOP_API_KEY: ${COPPERTOP_API_KEY:-}
+    ports:
+      - "8080:80"
+    restart: unless-stopped
+
+volumes:
+  coppertop-data:

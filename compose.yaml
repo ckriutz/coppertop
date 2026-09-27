@@ -1,0 +1,44 @@
+# Runs all four services. Secrets come from the shell or ./.env (never committed):
+#   COPPERTOP_API_KEY, KRAKEN_API_KEY, KRAKEN_API_SECRET
+services:
+  api:
+    build: ./src/Coppertop.Api
+    environment:
+      Api__Key: ${COPPERTOP_API_KEY:-}
+    volumes:
+      - coppertop-data:/data
+    ports:
+      - "5057:8080"
+    restart: unless-stopped
+
+  trader:
+    build: ./src/Coppertop.Trader
+    depends_on: [api]
+    environment:
+      CoppertopApi__BaseUrl: http://api:8080
+      CoppertopApi__ApiKey: ${COPPERTOP_API_KEY:-}
+      Trader__Mode: Paper
+      Kraken__ApiKey: ${KRAKEN_API_KEY:-}
+      Kraken__ApiSecret: ${KRAKEN_API_SECRET:-}
+    restart: unless-stopped
+
+  research:
+    build: ./src/Coppertop.Research
+    depends_on: [api]
+    environment:
+      CoppertopApi__BaseUrl: http://api:8080
+      CoppertopApi__ApiKey: ${COPPERTOP_API_KEY:-}
+    restart: unless-stopped
+
+  web:
+    build: ./src/Coppertop.Web
+    depends_on: [api]
+    environment:
+      COPPERTOP_API_URL: http://api:8080
+      COPPERTOP_API_KEY: ${COPPERTOP_API_KEY:-}
+    ports:
+      - "8080:80"
+    restart: unless-stopped
+
+volumes:
+  coppertop-data:
