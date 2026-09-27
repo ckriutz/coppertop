@@ -106,16 +106,109 @@ public class DipStrategyTests
     [Fact]
     public void Skips_UnknownStrategy() =>
         Assert.Null(DipStrategy.Evaluate(Opp(strategy: "grid"), new Ticker("XBTUSD", 97.1m, 97.0m, 97m), Closes, Pair, Empty, Options).Plan);
+}
 
-    [Theory]
-    [InlineData(101.0, "take_profit")]
-    [InlineData(97.9, "stop_loss")]
-    [InlineData(100.0, null)]
-    public void ExitReason_ByBid(double bid, string? expected)
+public class PaperFillTests
+{
+    private static readonly DateTimeOffset T0 = DateTimeOffset.Parse("2026-01-01T00:00:00Z");
+    private static readonly TraderOptions Options = new();
+
+    private static OrderDto Order(decimal price = 100m) =>
+        new(1, 1, null, "XBTUSD", "buy", "limit", "entry", price, 0.1m, "open", true, null, T0);
+
+    private static PositionDto Position() =>
+        new(1, 1, "XBTUSD", 0.1m, 100m, 0.025m, 10.025m, 101.5m, 98.0m, "open", true, T0);
+
+    private static PublicTrade Print(decimal price, int secondsAfterT0) => new(price, 0.01m, T0.AddSeconds(secondsAfterT0));
+
+    private static Ticker Quote(decimal bid, decimal? ask = null) => new("XBTUSD", ask ?? bid + 0.01m, bid, bid);
+
+    [Fact]
+    public void Entry_PrintAtLimit_DoesNotFill() =>
+        Assert.Null(PaperFills.Entry(Order(), [Print(100m, 5)], Quote(100.1m), T0.AddSeconds(30)));
+
+    [Fact]
+    public void Entry_PrintBelowLimit_BeforePlacement_DoesNotFill() =>
+        Assert.Null(PaperFills.Entry(Order(), [Print(99m, -5)], Quote(100.1m), T0.AddSeconds(30)));
+
+    [Fact]
+    public void Entry_PrintBelowLimit_FillsAtLimit_AtFirstThroughTime()
     {
-        var pos = new PositionDto(1, 1, "XBTUSD", 0.1m, 99.5m, 0.02m, 9.97m, 101.0m, 97.9m, "open", true);
-        var b = (decimal)bid;
-        Assert.Equal(expected, DipStrategy.ExitReason(pos, new Ticker("XBTUSD", b + 0.1m, b, b)));
+        var fill = PaperFills.Entry(Order(), [Print(100m, 3), Print(99.9m, 7), Print(99.8m, 9)], Quote(100.1m), T0.AddSeconds(30));
+        Assert.NotNull(fill);
+        Assert.Equal(100m, fill!.Price);
+        Assert.Equal(T0.AddSeconds(7), fill.ExecutedAt);
+    }
+
+    [Fact]
+    public void Entry_AskBelowLimit_Fills() =>
+        Assert.NotNull(PaperFills.Entry(Order(), [], Quote(99.8m, 99.9m), T0.AddSeconds(30)));
+
+    [Fact]
+    public void Cancel_WaitsWhileFresh() =>
+        Assert.Null(PaperFills.EntryCancelReason(Order(), Quote(100.1m), false, T0.AddMinutes(5), Options));
+
+    [Fact]
+    public void Cancel_AfterTimeout() =>
+        Assert.Contains("not filled", PaperFills.EntryCancelReason(Order(), Quote(100.1m), false, T0.AddMinutes(15), Options));
+
+    [Fact]
+    public void Cancel_WhenVetoed() =>
+        Assert.Equal("asset vetoed", PaperFills.EntryCancelReason(Order(), Quote(100.1m), true, T0.AddMinutes(1), Options));
+
+    [Fact]
+    public void Cancel_WhenPriceRunsAway() =>
+        Assert.Contains("ran away", PaperFills.EntryCancelReason(Order(), Quote(100.6m), false, T0.AddMinutes(1), Options));
+
+    [Fact]
+    public void Exit_PrintAtTakeProfit_DoesNotFill() =>
+        Assert.Null(PaperFills.Exit(Position(), [Print(101.5m, 60)], Quote(101.4m), T0.AddMinutes(2), 0.1m, 1));
+
+    [Fact]
+    public void Exit_PrintAboveTakeProfit_FillsAtTakeProfit()
+    {
+        var fill = PaperFills.Exit(Position(), [Print(101.6m, 60)], Quote(101.2m), T0.AddMinutes(2), 0.1m, 1);
+        Assert.Equal("take_profit", fill!.Reason);
+        Assert.Equal(101.5m, fill.Price);
+        Assert.Equal(T0.AddSeconds(60), fill.ExecutedAt);
+    }
+
+    [Fact]
+    public void Exit_IgnoresPrintsBeforeEntryFill() =>
+        Assert.Null(PaperFills.Exit(Position(), [Print(102m, -10), Print(97m, -5)], Quote(100m), T0.AddMinutes(2), 0.1m, 1));
+
+    [Fact]
+    public void Exit_StopWick_FillsAtStopLessSlippage_EvenIfBidRecovered()
+    {
+        var fill = PaperFills.Exit(Position(), [Print(97.9m, 60)], Quote(99m), T0.AddMinutes(2), 0.1m, 1);
+        Assert.Equal("stop_loss", fill!.Reason);
+        Assert.Equal(97.9m, fill.Price); // 98.0 * 0.999 = 97.902 → rounded down to 1 dp
+    }
+
+    [Fact]
+    public void Exit_GapBelowStop_FillsAtBidLessSlippage()
+    {
+        var fill = PaperFills.Exit(Position(), [], Quote(95m), T0.AddMinutes(2), 0.1m, 1);
+        Assert.Equal("stop_loss", fill!.Reason);
+        Assert.Equal(94.9m, fill.Price); // 95 * 0.999 = 94.905
+    }
+
+    [Fact]
+    public void Exit_WhicheverHappenedFirstWins()
+    {
+        var tpFirst = PaperFills.Exit(Position(), [Print(101.6m, 10), Print(97.5m, 20)], Quote(99m), T0.AddMinutes(1), 0.1m, 1);
+        Assert.Equal("take_profit", tpFirst!.Reason);
+
+        var stopFirst = PaperFills.Exit(Position(), [Print(97.5m, 10), Print(101.6m, 20)], Quote(99m), T0.AddMinutes(1), 0.1m, 1);
+        Assert.Equal("stop_loss", stopFirst!.Reason);
+    }
+
+    [Fact]
+    public void ExitPrices_RoundInTheConservativeDirection()
+    {
+        var (tp, sl) = DipStrategy.ExitPrices(97m, 1.5m, 2m, 1);
+        Assert.Equal(98.5m, tp);
+        Assert.Equal(95.0m, sl);
     }
 }
 
@@ -131,6 +224,22 @@ public class KrakenTests
         var sig = KrakenSigner.Sign("/0/private/AddOrder", nonce, postData, secret);
 
         Assert.Equal("4/dpxb3iT4tp/ZCVEwSnEsLxx0bqyhLpdfOpc6fn7OR8+UClSV5n9E6aSS8MPtnRfp32bAb0nmbRn6H8ndwLUQ==", sig);
+    }
+
+    [Fact]
+    public void ParseTrades_ReadsRowsAndCursor()
+    {
+        using var doc = System.Text.Json.JsonDocument.Parse("""
+            {"XXBTZUSD":[["65000.10000","0.00100000",1700000000.1234,"s","m","",1],
+                         ["64999.90000","0.00200000",1700000001.5,"b","l","",2]],
+             "last":"1700000001500000000"}
+            """);
+        var page = KrakenClient.ParseTrades(doc.RootElement, "0");
+
+        Assert.Equal(2, page.Trades.Count);
+        Assert.Equal(64999.9m, page.Trades[1].Price);
+        Assert.Equal(DateTimeOffset.FromUnixTimeMilliseconds(1700000000123), page.Trades[0].Time);
+        Assert.Equal("1700000001500000000", page.Last);
     }
 
     [Theory]

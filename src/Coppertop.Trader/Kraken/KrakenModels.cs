@@ -16,6 +16,10 @@ public sealed record Ticker(string AltName, decimal Ask, decimal Bid, decimal La
 
 public sealed record Candle(DateTimeOffset Time, decimal Open, decimal High, decimal Low, decimal Close, decimal Volume);
 
+public sealed record PublicTrade(decimal Price, decimal Volume, DateTimeOffset Time);
+
+public sealed record TradesPage(IReadOnlyList<PublicTrade> Trades, string Last);
+
 public sealed record AddOrderRequest(
     string Pair,
     string Side,

@@ -22,6 +22,13 @@ public sealed class TraderOptions
     public int CandleIntervalMinutes { get; set; } = 5;
     public int SmaPeriod { get; set; } = 20;
     public decimal BandStdDevs { get; set; } = 1.5m;
+
+    // Paper fill model: resting limits only fill when the market trades through them.
+    public int EntryOrderTimeoutMinutes { get; set; } = 15;
+    public decimal EntryOrderRunawayPct { get; set; } = 0.5m;
+    public decimal StopLossSlippagePct { get; set; } = 0.10m;
+    public int TradesLookbackMinutes { get; set; } = 60;
+    public int TradesMaxPages { get; set; } = 5;
 }
 
 public sealed class CoppertopApiOptions

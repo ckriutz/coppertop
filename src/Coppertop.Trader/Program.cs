@@ -16,6 +16,7 @@ if (!mode.Equals("Paper", StringComparison.OrdinalIgnoreCase))
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<KrakenPairCache>();
 builder.Services.AddSingleton<CandleCache>();
+builder.Services.AddSingleton<TradeTape>();
 builder.Services.AddHttpClient<KrakenClient>(c => c.Timeout = TimeSpan.FromSeconds(15));
 builder.Services.AddHttpClient<CoppertopApiClient>(c => c.Timeout = TimeSpan.FromSeconds(10));
 builder.Services.AddScoped<TraderEngine>();

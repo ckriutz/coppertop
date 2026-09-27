@@ -174,6 +174,87 @@ public sealed class ApiTests : IDisposable
         Assert.Equal("OABC-123", updated.KrakenTxId);
         Assert.Equal("validate-only", updated.Note);
     }
+
+    private async Task<Order> CreateOrder(string side, string purpose, long? positionId = null, decimal price = 50000m)
+    {
+        var res = await _client.PostAsJsonAsync("/orders", new CreateOrderRequest(
+            null, positionId, "XBTUSD", side, "limit", purpose, price, 0.0002m, "open", null, true, null));
+        Assert.Equal(HttpStatusCode.Created, res.StatusCode);
+        return (await res.Content.ReadFromJsonAsync<Order>())!;
+    }
+
+    [Fact]
+    public async Task FillingEntryOrder_OpensPosition_RecordsTrade_AndLinksOrder()
+    {
+        var order = await CreateOrder("buy", "entry");
+        var executedAt = DateTimeOffset.Parse("2026-01-01T00:00:00Z");
+
+        var res = await _client.PostAsJsonAsync($"/orders/{order.Id}/fill",
+            new FillOrderRequest(50000m, 0.0002m, 0.025m, executedAt, 50750m, 49000m, "paper fill"));
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        var fill = (await res.Content.ReadFromJsonAsync<FillOrderResponse>())!;
+
+        Assert.Equal("filled", fill.Order.Status);
+        Assert.Equal(fill.Position.Id, fill.Order.PositionId);
+        Assert.Equal("open", fill.Position.Status);
+        Assert.Equal(10.025m, fill.Position.CostUsd);
+        Assert.Equal(executedAt, fill.Position.OpenedAt);
+        Assert.Equal(fill.Position.Id, fill.Trade.PositionId);
+        Assert.Equal(order.Id, fill.Trade.OrderId);
+
+        var again = await _client.PostAsJsonAsync($"/orders/{order.Id}/fill",
+            new FillOrderRequest(50000m, 0.0002m, 0.025m, null, 50750m, 49000m, null));
+        Assert.Equal(HttpStatusCode.Conflict, again.StatusCode);
+        Assert.Single((await _client.GetFromJsonAsync<List<Position>>("/positions?status=open"))!);
+    }
+
+    [Fact]
+    public async Task FillingEntryOrder_WithoutExits_Returns400_AndLeavesOrderOpen()
+    {
+        var order = await CreateOrder("buy", "entry");
+        var res = await _client.PostAsJsonAsync($"/orders/{order.Id}/fill",
+            new FillOrderRequest(50000m, 0.0002m, 0.025m, null, null, null, null));
+        Assert.Equal(HttpStatusCode.BadRequest, res.StatusCode);
+        Assert.Single((await _client.GetFromJsonAsync<List<Order>>("/orders?status=open"))!);
+    }
+
+    [Fact]
+    public async Task FillingSellOrder_ClosesPosition_WithPurposeAsReason()
+    {
+        var entry = await CreateOrder("buy", "entry");
+        var opened = (await (await _client.PostAsJsonAsync($"/orders/{entry.Id}/fill",
+            new FillOrderRequest(50000m, 0.0002m, 0.025m, null, 50750m, 49000m, null)))
+            .Content.ReadFromJsonAsync<FillOrderResponse>())!;
+
+        var exit = await CreateOrder("sell", "take_profit", opened.Position.Id, 50750m);
+        var res = await _client.PostAsJsonAsync($"/orders/{exit.Id}/fill",
+            new FillOrderRequest(50750m, 0.0002m, 0.02538m, null, null, null, null));
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        var fill = (await res.Content.ReadFromJsonAsync<FillOrderResponse>())!;
+
+        Assert.Equal("closed", fill.Position.Status);
+        Assert.Equal("take_profit", fill.Position.CloseReason);
+        Assert.Equal(0.09962m, fill.Position.RealizedPnlUsd!.Value, 5);
+        Assert.Equal(2, (await _client.GetFromJsonAsync<List<Trade>>("/trades"))!.Count);
+    }
+
+    [Fact]
+    public async Task CancelledOrder_CannotBeFilled_AndFilledOrderCannotBeCancelled()
+    {
+        var cancelled = await CreateOrder("buy", "entry");
+        var cancel = await _client.PostAsJsonAsync($"/orders/{cancelled.Id}/cancel", new CancelOrderRequest("timeout"));
+        Assert.Equal(HttpStatusCode.OK, cancel.StatusCode);
+        Assert.Equal("timeout", (await cancel.Content.ReadFromJsonAsync<Order>())!.Note);
+        var fill = await _client.PostAsJsonAsync($"/orders/{cancelled.Id}/fill",
+            new FillOrderRequest(50000m, 0.0002m, 0.025m, null, 50750m, 49000m, null));
+        Assert.Equal(HttpStatusCode.Conflict, fill.StatusCode);
+
+        var filled = await CreateOrder("buy", "entry");
+        await _client.PostAsJsonAsync($"/orders/{filled.Id}/fill",
+            new FillOrderRequest(50000m, 0.0002m, 0.025m, null, 50750m, 49000m, null));
+        var late = await _client.PostAsJsonAsync($"/orders/{filled.Id}/cancel", new CancelOrderRequest(null));
+        Assert.Equal(HttpStatusCode.Conflict, late.StatusCode);
+    }
 }
 
 public sealed class ApiKeyTests : IDisposable

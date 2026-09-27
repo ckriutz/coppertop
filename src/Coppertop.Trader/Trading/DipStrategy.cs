@@ -70,8 +70,7 @@ public static class DipStrategy
         if (pair.CostMin > 0 && entry * volume < pair.CostMin)
             return EntryDecision.Skip($"cost {entry * volume:F2} below Kraken minimum {pair.CostMin}");
 
-        var tp = RoundUp(entry * (1m + opportunity.TakeProfitPct / 100m), pair.PriceDecimals);
-        var sl = RoundDown(entry * (1m - opportunity.StopLossPct / 100m), pair.PriceDecimals);
+        var (tp, sl) = ExitPrices(entry, opportunity.TakeProfitPct, opportunity.StopLossPct, pair.PriceDecimals);
 
         return new EntryDecision(
             new EntryPlan(entry, volume, entry * volume, tp, sl,
@@ -79,12 +78,10 @@ public static class DipStrategy
             "enter");
     }
 
-    public static string? ExitReason(PositionDto position, Ticker ticker)
-    {
-        if (ticker.Bid >= position.TakeProfitPrice) return "take_profit";
-        if (ticker.Bid <= position.StopLossPrice) return "stop_loss";
-        return null;
-    }
+    // TP rounds up and SL rounds down so rounding never makes the trade look better than planned.
+    public static (decimal TakeProfit, decimal StopLoss) ExitPrices(decimal entry, decimal takeProfitPct, decimal stopLossPct, int priceDecimals) =>
+        (RoundUp(entry * (1m + takeProfitPct / 100m), priceDecimals),
+         RoundDown(entry * (1m - stopLossPct / 100m), priceDecimals));
 
     private static decimal RoundDown(decimal v, int decimals) => Math.Round(v, decimals, MidpointRounding.ToZero);
 

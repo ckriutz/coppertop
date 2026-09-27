@@ -17,7 +17,13 @@ public static class PositionStatus
 
 public static class OrderStatuses
 {
-    public static readonly string[] All = ["validated", "open", "filled", "cancelled", "rejected", "simulated"];
+    public const string Validated = "validated";
+    public const string Open = "open";
+    public const string Filled = "filled";
+    public const string Cancelled = "cancelled";
+
+    public static readonly string[] All = [Validated, Open, Filled, Cancelled, "rejected", "simulated"];
+    public static readonly string[] Pending = [Validated, Open];
 }
 
 public sealed class Opportunity
@@ -126,6 +132,23 @@ public sealed record CreateOrderRequest(
     string? Note);
 
 public sealed record UpdateOrderRequest(string Status, string? KrakenTxId, string? Note);
+
+/// <summary>
+/// Marks an open order filled in one transaction. A buy "entry" opens a position (TP/SL required);
+/// a sell with a position id closes that position with the order's purpose as the reason.
+/// </summary>
+public sealed record FillOrderRequest(
+    decimal Price,
+    decimal Volume,
+    decimal FeeUsd,
+    DateTimeOffset? ExecutedAt,
+    decimal? TakeProfitPrice,
+    decimal? StopLossPrice,
+    string? Note);
+
+public sealed record CancelOrderRequest(string? Note);
+
+public sealed record FillOrderResponse(Order Order, Position Position, Trade Trade);
 
 public sealed class Trade
 {

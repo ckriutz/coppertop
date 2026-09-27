@@ -89,6 +89,39 @@ public sealed class KrakenClient
         return candles;
     }
 
+    public const int TradesPageSize = 1000;
+
+    /// <summary>Public trade prints after <paramref name="since"/> (unix seconds or Kraken's nanosecond cursor).</summary>
+    public async Task<TradesPage> GetTradesAsync(string altName, string since, CancellationToken ct)
+    {
+        var result = await GetPublicAsync($"/0/public/Trades?pair={altName}&since={since}&count={TradesPageSize}", ct);
+        return ParseTrades(result, since);
+    }
+
+    public static TradesPage ParseTrades(JsonElement result, string since)
+    {
+        var trades = new List<PublicTrade>();
+        var last = since;
+        foreach (var prop in result.EnumerateObject())
+        {
+            if (prop.Name == "last")
+            {
+                last = prop.Value.ValueKind == JsonValueKind.String ? prop.Value.GetString()! : prop.Value.GetRawText();
+                continue;
+            }
+            if (prop.Value.ValueKind != JsonValueKind.Array) continue;
+            // Row: [price, volume, time (seconds, fractional), side, type, misc, trade_id]
+            foreach (var row in prop.Value.EnumerateArray())
+            {
+                var seconds = row[2].GetDouble();
+                trades.Add(new PublicTrade(
+                    ParseDecimal(row[0]), ParseDecimal(row[1]),
+                    DateTimeOffset.FromUnixTimeMilliseconds((long)Math.Round(seconds * 1000))));
+            }
+        }
+        return new TradesPage(trades, last);
+    }
+
     public async Task<IReadOnlyDictionary<string, decimal>> GetBalancesAsync(CancellationToken ct)
     {
         var result = await PostPrivateAsync("/0/private/Balance", [], ct);

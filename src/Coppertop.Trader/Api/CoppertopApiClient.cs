@@ -28,7 +28,8 @@ public sealed record PositionDto(
     decimal TakeProfitPrice,
     decimal StopLossPrice,
     string Status,
-    bool IsSimulated);
+    bool IsSimulated,
+    DateTimeOffset OpenedAt);
 
 public sealed record OpenPositionDto(
     long? OpportunityId,
@@ -56,7 +57,35 @@ public sealed record CreateOrderDto(
     bool IsSimulated,
     string? Note);
 
-public sealed record OrderDto(long Id, string Status);
+public sealed record OrderDto(
+    long Id,
+    long? OpportunityId,
+    long? PositionId,
+    string Asset,
+    string Side,
+    string OrderType,
+    string Purpose,
+    decimal Price,
+    decimal Volume,
+    string Status,
+    bool IsSimulated,
+    string? Note,
+    DateTimeOffset CreatedAt);
+
+public sealed record FillOrderDto(
+    decimal Price,
+    decimal Volume,
+    decimal FeeUsd,
+    DateTimeOffset? ExecutedAt,
+    decimal? TakeProfitPrice,
+    decimal? StopLossPrice,
+    string? Note);
+
+public sealed record FillOrderResultDto(OrderDto Order, PositionDto Position);
+
+public sealed record CancelOrderDto(string? Note);
+
+public sealed record VetoDto(long Id, string Asset, string Reason, DateTimeOffset ExpiresAt);
 
 public sealed record CreateTradeDto(
     long? OrderId,
@@ -92,6 +121,37 @@ public sealed class CoppertopApiClient
         using var res = await _http.PostAsync($"/opportunities/{id}/consume", null, ct);
         if (res.StatusCode is HttpStatusCode.Conflict or HttpStatusCode.NotFound) return false;
         res.EnsureSuccessStatusCode();
+        return true;
+    }
+
+    public async Task<OpportunityDto?> GetOpportunityAsync(long id, CancellationToken ct)
+    {
+        using var res = await _http.GetAsync($"/opportunities/{id}", ct);
+        if (res.StatusCode == HttpStatusCode.NotFound) return null;
+        await EnsureSuccessAsync(res, ct);
+        return await res.Content.ReadFromJsonAsync<OpportunityDto>(ct);
+    }
+
+    public async Task<IReadOnlyList<VetoDto>> GetActiveVetoesAsync(CancellationToken ct) =>
+        await _http.GetFromJsonAsync<List<VetoDto>>("/vetoes?active=true", ct) ?? [];
+
+    public async Task<IReadOnlyList<OrderDto>> GetOpenOrdersAsync(CancellationToken ct) =>
+        await _http.GetFromJsonAsync<List<OrderDto>>("/orders?status=open", ct) ?? [];
+
+    // Returns null if the order was no longer open (already filled or cancelled).
+    public async Task<FillOrderResultDto?> TryFillOrderAsync(long id, FillOrderDto dto, CancellationToken ct)
+    {
+        using var res = await _http.PostAsJsonAsync($"/orders/{id}/fill", dto, ct);
+        if (res.StatusCode == HttpStatusCode.Conflict) return null;
+        await EnsureSuccessAsync(res, ct);
+        return await res.Content.ReadFromJsonAsync<FillOrderResultDto>(ct);
+    }
+
+    public async Task<bool> TryCancelOrderAsync(long id, string note, CancellationToken ct)
+    {
+        using var res = await _http.PostAsJsonAsync($"/orders/{id}/cancel", new CancelOrderDto(note), ct);
+        if (res.StatusCode == HttpStatusCode.Conflict) return false;
+        await EnsureSuccessAsync(res, ct);
         return true;
     }
 

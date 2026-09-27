@@ -270,6 +270,90 @@ public static class CoppertopEndpoints
                 ? Results.NotFound()
                 : Results.Ok(c.QuerySingle<Order>("SELECT * FROM orders WHERE id = @id", new { id }));
         });
+
+        group.MapPost("/{id:long}/fill", (Database db, TimeProvider clock, long id, FillOrderRequest req) => FillOrder(db, clock, id, req));
+
+        group.MapPost("/{id:long}/cancel", (Database db, TimeProvider clock, long id, CancelOrderRequest? req) =>
+        {
+            using var c = db.Open();
+            var changed = c.Execute("""
+                UPDATE orders SET status = @cancelled, note = COALESCE(@note, note), updated_at = @now
+                WHERE id = @id AND status IN @pending
+                """,
+                new { cancelled = OrderStatuses.Cancelled, note = req?.Note, now = Database.Ts(clock.GetUtcNow()), id, pending = OrderStatuses.Pending });
+            if (changed == 0)
+            {
+                var exists = c.ExecuteScalar<long>("SELECT COUNT(*) FROM orders WHERE id = @id", new { id }) > 0;
+                return exists ? Results.Conflict(new { error = "Order is not open." }) : Results.NotFound();
+            }
+            return Results.Ok(c.QuerySingle<Order>("SELECT * FROM orders WHERE id = @id", new { id }));
+        });
+    }
+
+    private static IResult FillOrder(Database db, TimeProvider clock, long id, FillOrderRequest req)
+    {
+        var now = clock.GetUtcNow();
+        var executedAt = Database.Ts(req.ExecutedAt ?? now);
+        using var c = db.Open();
+        using var tx = c.BeginTransaction();
+
+        var order = c.QuerySingleOrDefault<Order>("SELECT * FROM orders WHERE id = @id", new { id }, tx);
+        if (order is null) return Results.NotFound();
+
+        var errors = Validation.Fill(req, order);
+        if (errors.Count > 0) return Results.ValidationProblem(errors);
+
+        // Claim the order first: the conditional update makes fill/cancel races resolve to exactly one winner.
+        var claimed = c.Execute("""
+            UPDATE orders SET status = @filled, note = COALESCE(@Note, note), updated_at = @now
+            WHERE id = @id AND status IN @pending
+            """, new { filled = OrderStatuses.Filled, req.Note, now = Database.Ts(now), id, pending = OrderStatuses.Pending }, tx);
+        if (claimed == 0) return Results.Conflict(new { error = "Order is not open." });
+
+        long positionId;
+        if (order.Side == "buy")
+        {
+            positionId = c.ExecuteScalar<long>("""
+                INSERT INTO positions (opportunity_id, asset, volume, entry_price, entry_fee_usd, cost_usd,
+                    take_profit_price, stop_loss_price, status, is_simulated, opened_at)
+                VALUES (@OpportunityId, @Asset, @Volume, @Price, @FeeUsd, @cost,
+                    @TakeProfitPrice, @StopLossPrice, @open, @IsSimulated, @executedAt);
+                SELECT last_insert_rowid();
+                """,
+                new
+                {
+                    order.OpportunityId, order.Asset, req.Volume, req.Price, req.FeeUsd, cost = req.Price * req.Volume + req.FeeUsd,
+                    req.TakeProfitPrice, req.StopLossPrice, open = PositionStatus.Open, order.IsSimulated, executedAt
+                }, tx);
+        }
+        else
+        {
+            positionId = order.PositionId!.Value;
+            var position = c.QuerySingleOrDefault<Position>("SELECT * FROM positions WHERE id = @positionId", new { positionId }, tx);
+            if (position is null || position.Status != PositionStatus.Open)
+                return Results.Conflict(new { error = "Position is not open." });
+
+            var pnl = req.Price * position.Volume - req.FeeUsd - position.CostUsd;
+            c.Execute("""
+                UPDATE positions SET status = @closed, closed_at = @executedAt, exit_price = @Price,
+                    exit_fee_usd = @FeeUsd, realized_pnl_usd = @pnl, close_reason = @reason
+                WHERE id = @positionId
+                """,
+                new { closed = PositionStatus.Closed, executedAt, req.Price, req.FeeUsd, pnl, reason = order.Purpose, positionId }, tx);
+        }
+
+        var tradeId = c.ExecuteScalar<long>("""
+            INSERT INTO trades (order_id, position_id, asset, side, price, volume, fee_usd, is_simulated, executed_at)
+            VALUES (@id, @positionId, @Asset, @Side, @Price, @Volume, @FeeUsd, @IsSimulated, @executedAt);
+            SELECT last_insert_rowid();
+            """, new { id, positionId, order.Asset, order.Side, req.Price, req.Volume, req.FeeUsd, order.IsSimulated, executedAt }, tx);
+        c.Execute("UPDATE orders SET position_id = @positionId WHERE id = @id", new { positionId, id }, tx);
+        tx.Commit();
+
+        return Results.Ok(new FillOrderResponse(
+            c.QuerySingle<Order>("SELECT * FROM orders WHERE id = @id", new { id }),
+            c.QuerySingle<Position>("SELECT * FROM positions WHERE id = @positionId", new { positionId }),
+            c.QuerySingle<Trade>("SELECT * FROM trades WHERE id = @tradeId", new { tradeId })));
     }
 
     private static void MapTrades(WebApplication app)

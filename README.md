@@ -57,11 +57,21 @@ Quick checks: `curl localhost:5057/summary`, `curl "localhost:5057/positions?sta
 ## Safety
 - The Trader only runs in **Paper** mode. Any other `Trader:Mode` makes it refuse to start.
 - If Kraken credentials are set (`Kraken__ApiKey`, `Kraken__ApiSecret`, or user-secrets), the Trader sends each entry to Kraken with `validate=true`. Kraken checks the order and places nothing. Fills are always simulated.
+
+## Paper fill model
+Paper fills are deliberately pessimistic, so paper P&L shouldn't flatter the strategy:
+- **Entries rest.** A buy is recorded as an `open` order at the bid; no position exists yet. It fills (at the limit) only when a Kraken public trade prints *strictly below* the limit after placement, or the ask drops below it. A print exactly at our price doesn't count, because we don't know our place in the queue.
+- **Pending buys reserve cash** and count toward max positions and per-asset exposure.
+- **Unfilled buys are cancelled** after `EntryOrderTimeoutMinutes` (15), when the bid runs `EntryOrderRunawayPct` (0.5%) above the limit, or when the asset is vetoed. The next Research run can re-approve the coin.
+- **Take-profit** is a resting maker sell. It fills at the TP price only when a trade prints strictly above it.
+- **Stop-loss** is a taker market sell once price touches the stop. It fills at min(stop, bid) less `StopLossSlippagePct` (0.1%).
+- If both the take-profit and the stop were reached in the same window, whichever happened first wins, and ties go to the stop.
+- Kraken's `Trades` endpoint is read incrementally per asset (`TradeTape`), so brief wicks between 30s cycles aren't missed.
+- The Api records fills atomically: `POST /orders/{id}/fill` opens or closes the position, records the trade and links the order. `POST /orders/{id}/cancel` only succeeds on open orders.
 - Setting `Api:Key` on the Api, and `CoppertopApi:ApiKey` on the other two services, turns on the `X-Api-Key` header check.
 
 ## Known limitations / next steps
 - Research is a stub: it approves every watchlist asset below its last price. Next: TypeSafe AI for the decision logic, Sonar for news vetoes, and token usage recorded through `POST /token-usage`.
-- Paper fills are optimistic: the Trader assumes limit entries fill instantly at the bid.
 - Live mode: Kraken supports only one conditional close order per entry, so the take-profit sits on Kraken and the Trader must watch the stop-loss itself.
 - The dashboard has no live prices yet, so it can't show unrealized P&L. It also has no kill switch.
 - Prices are polled over REST. Switch to WebSocket if polling is too slow.

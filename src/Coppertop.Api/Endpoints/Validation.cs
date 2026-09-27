@@ -65,6 +65,25 @@ public static class Validation
         return e.Result;
     }
 
+    public static Dictionary<string, string[]> Fill(FillOrderRequest r, Order order)
+    {
+        var e = new Errors();
+        e.Require(r.Price > 0, "price", "Must be > 0.");
+        e.Require(r.Volume > 0, "volume", "Must be > 0.");
+        e.Require(r.FeeUsd >= 0, "feeUsd", "Must be >= 0.");
+        if (order.Side == "buy")
+        {
+            e.Require(order.Purpose == "entry", "purpose", "Only buy orders with purpose 'entry' can be filled.");
+            e.Require(r.TakeProfitPrice > r.Price, "takeProfitPrice", "Required and must be above price.");
+            e.Require(r.StopLossPrice > 0 && r.StopLossPrice < r.Price, "stopLossPrice", "Required and must be between 0 and price.");
+        }
+        else
+        {
+            e.Require(order.PositionId is not null, "positionId", "Sell orders need a position to close.");
+        }
+        return e.Result;
+    }
+
     public static Dictionary<string, string[]> Trade(CreateTradeRequest r)
     {
         var e = new Errors();

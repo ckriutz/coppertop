@@ -61,3 +61,4 @@ tr:last-child td { border-bottom: none; }
 
 .status-rejected, .status-cancelled { color: var(--neg); }
 .status-filled, .status-validated { color: var(--pos); }
+.status-open { color: #f0c05a; }
