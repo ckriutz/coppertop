@@ -7,7 +7,7 @@ Automated Kraken crypto trader. Three fully isolated backend services plus a web
 | **Api** | `src/Coppertop.Api` | The only service that writes to SQLite: opportunities, vetoes, positions, orders, trades, token usage and the summary. | No |
 | **Trader** | `src/Coppertop.Trader` | Runs a plain C# loop every 30s: reads opportunities, checks prices, enters positions and manages exits. | No |
 | **Research** | `src/Coppertop.Research` | Publishes opportunities (what to buy and within which limits). Currently a **stub**. | Later |
-| **Web** | `src/Coppertop.Web` | React dashboard: summary, open positions, opportunities, orders, trades, closed positions and token usage. Refreshes every 10s. | No |
+| **Web** | `src/Coppertop.Web` | React dashboard: summary, live unrealized P&L, open positions, opportunities, orders, trades, closed positions, stats and token usage, plus the kill switch. Refreshes every 10s. | No |
 
 ## How Research tells the Trader what to buy
 1. Research sends `POST /opportunities` with `{ asset, strategy:"dip", maxEntryPrice, takeProfitPct, stopLossPct, maxSpendUsd, confidence, reason, expiresAt }`. A new opportunity replaces the previous one for the same asset and strategy.
@@ -25,7 +25,7 @@ docker compose up --build        # or: podman compose up --build
 
 Optional secrets go in `./.env` (git-ignored) or the shell:
 - `COPPERTOP_API_KEY` turns on the key check between services. nginx adds the key to requests on the server side, so the browser never sees it.
-- `KRAKEN_API_KEY` and `KRAKEN_API_SECRET` turn on Kraken's `validate=true` order checks.
+- `KRAKEN_API_KEY` and `KRAKEN_API_SECRET` (the Kraken key and its private key) turn on Kraken's `validate=true` order checks and the read-only Kraken account balances on the dashboard. The key needs "Query Funds" and "Create & Modify Orders"; never give it "Withdraw Funds". The names must be exactly these; compose won't pick up other names such as `API_KEY` / `PRIVATE_KEY`.
 
 Each service has its own `Dockerfile` in its folder and can be built on its own, e.g. `docker build src/Coppertop.Trader`. The Dockerfiles cross-compile for the target architecture (`--platform=$BUILDPLATFORM` + `dotnet publish -a $TARGETARCH`), so building arm64 images on an x64 machine is fast.
 
@@ -58,6 +58,23 @@ Quick checks: `curl localhost:5057/summary`, `curl "localhost:5057/positions?sta
 - The Trader only runs in **Paper** mode. Any other `Trader:Mode` makes it refuse to start.
 - If Kraken credentials are set (`Kraken__ApiKey`, `Kraken__ApiSecret`, or user-secrets), the Trader sends each entry to Kraken with `validate=true`. Kraken checks the order and places nothing. Fills are always simulated.
 
+## Dashboard controls (kill switch)
+- **Pause entries** (`PUT /control {entriesPaused}`): the Trader stops placing buys and cancels resting ones. Take-profits and stop-losses keep running. **Resume entries** turns buying back on.
+- **Flatten all** (`POST /control/flatten`): pauses entries, and on its next cycle the Trader cancels every open order and market-sells every position (taker fee plus slippage, close reason `flatten`). It then calls `POST /control/flatten/ack`. Entries stay paused until you resume them.
+- **Heartbeat**: each cycle the Trader posts `POST /control/heartbeat` with its mode, starting cash and latest prices (`GET /marks`). The dashboard uses these for unrealized P&L (at the bid, before exit fees), paper equity, and the Trader "running / stale" indicator.
+- **Stats** (`GET /stats?since=`): win rate, profit factor, average win and loss, best and worst trade, average hold time, P&L by exit reason, and the entry fill rate.
+
+## Kraken account balances
+
+When Kraken credentials are set, the Trader's `AccountWorker` reads the real account every `Kraken:AccountRefreshSeconds` (default 60, minimum 15) and posts a snapshot to the Api (`POST /account`, read with `GET /account`). It is read-only and never places orders.
+
+- It uses the private `BalanceEx` endpoint, which returns `{"ZUSD":{"balance":"58.03","hold_trade":"0"}, "XXBT":{...}, "USD.HOLD":{...}}`. Asset codes mix legacy prefixes (`XXBT`, `XETH`, `ZUSD`), plain codes (`SOL`, `ADA`) and suffixes (`.HOLD`, `.S` staked, `.F` earn). `hold_trade` is the amount reserved by open orders, so available = balance − hold.
+- Each asset is valued at the bid of its USD pair. The pair is found through the full `AssetPairs` list (cached for 24h, matching `base` and a `ZUSD`/`USD` quote), then one `Ticker` call prices them all. USD counts at $1. Assets with no USD pair show as unpriced, and zero balances are dropped.
+- If Kraken returns an error (for example `EGeneral:Permission denied` when the key lacks "Query Funds"), the dashboard shows it and keeps the last good snapshot.
+- **Dust** is a balance Kraken won't let you sell: below the USD pair's minimum order size (`ordermin`) or worth less than its minimum order value (`costmin`) at the bid. USD is never dust, and neither is an asset with no USD pair, because it can't be judged. Dust still counts in the total but is hidden from the **Kraken account** tab by default, with a "Show dust" toggle.
+- The dashboard shows an account strip (total value, USD cash available, sync time) and a **Kraken account** tab.
+- These are real balances and are separate from the paper P&L. Paper trading doesn't touch them.
+
 ## Paper fill model
 Paper fills are deliberately pessimistic, so paper P&L shouldn't flatter the strategy:
 - **Entries rest.** A buy is recorded as an `open` order at the bid; no position exists yet. It fills (at the limit) only when a Kraken public trade prints *strictly below* the limit after placement, or the ask drops below it. A print exactly at our price doesn't count, because we don't know our place in the queue.
@@ -73,6 +90,6 @@ Paper fills are deliberately pessimistic, so paper P&L shouldn't flatter the str
 ## Known limitations / next steps
 - Research is a stub: it approves every watchlist asset below its last price. Next: TypeSafe AI for the decision logic, Sonar for news vetoes, and token usage recorded through `POST /token-usage`.
 - Live mode: Kraken supports only one conditional close order per entry, so the take-profit sits on Kraken and the Trader must watch the stop-loss itself.
-- The dashboard has no live prices yet, so it can't show unrealized P&L. It also has no kill switch.
+- Unrealized P&L uses prices from the Trader's last cycle, so it only updates while the Trader is running.
 - Prices are polled over REST. Switch to WebSocket if polling is too slow.
 - Money columns are SQLite `REAL`, so they aren't exact to the cent. Switch to integer cents or TEXT if exactness matters.

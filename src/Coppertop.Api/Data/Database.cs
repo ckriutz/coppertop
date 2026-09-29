@@ -129,6 +129,47 @@ public sealed class Database
             cost_usd       REAL    NOT NULL,
             created_at     TEXT    NOT NULL
         );
+
+        -- Latest prices the Trader saw, used for unrealized P&L on the dashboard.
+        CREATE TABLE IF NOT EXISTS marks (
+            asset       TEXT PRIMARY KEY,
+            bid         REAL NOT NULL,
+            ask         REAL NOT NULL,
+            last        REAL NOT NULL,
+            updated_at  TEXT NOT NULL
+        );
+
+        -- Single-row kill switch plus the Trader's last heartbeat.
+        CREATE TABLE IF NOT EXISTS trader_control (
+            id                       INTEGER PRIMARY KEY CHECK (id = 1),
+            entries_paused           INTEGER NOT NULL DEFAULT 0,
+            flatten_requested        INTEGER NOT NULL DEFAULT 0,
+            updated_at               TEXT    NOT NULL,
+            last_seen_at             TEXT    NULL,
+            mode                     TEXT    NULL,
+            paper_starting_cash_usd  REAL    NULL,
+            cycle_seconds            INTEGER NULL
+        );
+        INSERT OR IGNORE INTO trader_control (id, updated_at) VALUES (1, '1970-01-01T00:00:00.0000000Z');
+
+        -- Latest snapshot of the real Kraken account (read-only), replaced wholesale by the Trader.
+        CREATE TABLE IF NOT EXISTS account_balances (
+            asset         TEXT PRIMARY KEY,
+            display_name  TEXT NOT NULL,
+            balance       REAL NOT NULL,
+            hold          REAL NOT NULL,
+            price_usd     REAL NULL,
+            is_dust       INTEGER NOT NULL DEFAULT 0,
+            updated_at    TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS account_status (
+            id              INTEGER PRIMARY KEY CHECK (id = 1),
+            synced_at       TEXT NULL,
+            error           TEXT NULL,
+            error_at        TEXT NULL
+        );
+        INSERT OR IGNORE INTO account_status (id) VALUES (1);
         """;
 
     private sealed class DateTimeOffsetHandler : SqlMapper.TypeHandler<DateTimeOffset>

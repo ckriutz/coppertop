@@ -47,5 +47,8 @@ public sealed class KrakenOptions
     public string ApiKey { get; set; } = "";
     public string ApiSecret { get; set; } = "";
 
+    // How often to read balances from the Kraken account (private API) when credentials are set.
+    public int AccountRefreshSeconds { get; set; } = 60;
+
     public bool HasCredentials => !string.IsNullOrWhiteSpace(ApiKey) && !string.IsNullOrWhiteSpace(ApiSecret);
 }

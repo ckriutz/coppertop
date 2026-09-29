@@ -1,3 +1,4 @@
+using Coppertop.Trader.Account;
 using Coppertop.Trader.Api;
 using Coppertop.Trader.Kraken;
 using Coppertop.Trader.Trading;
@@ -146,19 +147,31 @@ public class PaperFillTests
 
     [Fact]
     public void Cancel_WaitsWhileFresh() =>
-        Assert.Null(PaperFills.EntryCancelReason(Order(), Quote(100.1m), false, T0.AddMinutes(5), Options));
+        Assert.Null(PaperFills.EntryCancelReason(Order(), Quote(100.1m), false, false, T0.AddMinutes(5), Options));
 
     [Fact]
     public void Cancel_AfterTimeout() =>
-        Assert.Contains("not filled", PaperFills.EntryCancelReason(Order(), Quote(100.1m), false, T0.AddMinutes(15), Options));
+        Assert.Contains("not filled", PaperFills.EntryCancelReason(Order(), Quote(100.1m), false, false, T0.AddMinutes(15), Options));
 
     [Fact]
     public void Cancel_WhenVetoed() =>
-        Assert.Equal("asset vetoed", PaperFills.EntryCancelReason(Order(), Quote(100.1m), true, T0.AddMinutes(1), Options));
+        Assert.Equal("asset vetoed", PaperFills.EntryCancelReason(Order(), Quote(100.1m), true, false, T0.AddMinutes(1), Options));
 
     [Fact]
     public void Cancel_WhenPriceRunsAway() =>
-        Assert.Contains("ran away", PaperFills.EntryCancelReason(Order(), Quote(100.6m), false, T0.AddMinutes(1), Options));
+        Assert.Contains("ran away", PaperFills.EntryCancelReason(Order(), Quote(100.6m), false, false, T0.AddMinutes(1), Options));
+
+    [Fact]
+    public void Cancel_WhenEntriesPaused() =>
+        Assert.Equal("entries paused", PaperFills.EntryCancelReason(Order(), Quote(100.1m), false, true, T0.AddMinutes(1), Options));
+
+    [Fact]
+    public void Flatten_SellsAtBidLessSlippage()
+    {
+        var fill = PaperFlatten.Exit(Quote(100m), T0, 0.1m, 1);
+        Assert.Equal("flatten", fill.Reason);
+        Assert.Equal(99.9m, fill.Price);
+    }
 
     [Fact]
     public void Exit_PrintAtTakeProfit_DoesNotFill() =>
@@ -248,4 +261,84 @@ public class KrakenTests
     [InlineData(5, 2, "5.00")]
     public void Format_TruncatesToPairDecimals(double value, int decimals, string expected) =>
         Assert.Equal(expected, KrakenClient.Format((decimal)value, decimals));
+}
+
+public class AccountValuationTests
+{
+    private static readonly PairInfo[] Pairs =
+    [
+        new("XXBTZUSD", "XBTUSD", 1, 8, 0.0001m, 0.5m, "XXBT", "ZUSD"),
+        new("XBTUSDC", "XBTUSDC", 2, 8, 0.0001m, 0.5m, "XXBT", "USDC"),
+        new("XETHZUSD", "ETHUSD", 2, 8, 0.002m, 0.5m, "XETH", "ZUSD"),
+        new("XETHZUSD.d", "ETHUSD.d", 2, 8, 0.002m, 0.5m, "XETH", "ZUSD"),
+        new("ADAUSD", "ADAUSD", 6, 8, 5m, 0.5m, "ADA", "ZUSD"),
+        new("DOTEUR", "DOTEUR", 4, 8, 1m, 0.5m, "DOT", "ZEUR"),
+    ];
+
+    [Fact]
+    public void ParseBalances_ReadsBalanceAndHold()
+    {
+        using var doc = System.Text.Json.JsonDocument.Parse("""
+            {"ZUSD":{"balance":"58.0297","hold_trade":"10.0000"},"XXBT":{"balance":"0.0000012300","hold_trade":"0.0000000000"}}
+            """);
+        var balances = KrakenClient.ParseBalances(doc.RootElement);
+
+        Assert.Equal(2, balances.Count);
+        Assert.Equal(new KrakenBalance("ZUSD", 58.0297m, 10m), balances[0]);
+        Assert.Equal(0.00000123m, balances[1].Balance);
+    }
+
+    [Fact]
+    public void UsdPairsByBase_PicksUsdQuotedPairs_IgnoringDarkPoolAndOtherQuotes()
+    {
+        var map = AccountValuation.UsdPairsByBase(Pairs);
+
+        Assert.Equal("XBTUSD", map["XXBT"].AltName);
+        Assert.Equal("ETHUSD", map["XETH"].AltName);
+        Assert.Equal("ADAUSD", map["ADA"].AltName);
+        Assert.False(map.ContainsKey("DOT"));
+    }
+
+    [Fact]
+    public void Value_PricesAtBid_UsdAtOne_UnknownUnpriced_SkipsZero()
+    {
+        var usdPairs = AccountValuation.UsdPairsByBase(Pairs);
+        KrakenBalance[] balances =
+        [
+            new("ZUSD", 58m, 10m),
+            new("USD.HOLD", 2m, 0m),
+            new("XXBT", 0.001m, 0m),
+            new("ADA.S", 10m, 0m),
+            new("DOT", 3m, 0m),
+            new("XETH", 0m, 0m),
+            new("ADA", 1m, 0m),
+        ];
+
+        Assert.Equal(["XBTUSD", "ADAUSD"], AccountValuation.PairsToPrice(balances, usdPairs));
+
+        var tickers = new Dictionary<string, Ticker>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["XBTUSD"] = new("XBTUSD", 60001m, 60000m, 60000m),
+            ["ADAUSD"] = new("ADAUSD", 0.51m, 0.5m, 0.5m),
+        };
+        var valued = AccountValuation.Value(balances, usdPairs, tickers);
+
+        Assert.Equal(6, valued.Count);
+        Assert.Equal(new AccountBalanceDto("ZUSD", "USD", 58m, 10m, 1m), valued[0]);
+        Assert.Equal("USD.HOLD", valued[1].DisplayName);
+        Assert.Equal(new AccountBalanceDto("XXBT", "XBT", 0.001m, 0m, 60000m), valued[2]);
+        Assert.Equal(new AccountBalanceDto("ADA.S", "ADA.S", 10m, 0m, 0.5m), valued[3]);
+        Assert.Equal(new AccountBalanceDto("DOT", "DOT", 3m, 0m, null), valued[4]);
+        Assert.Equal(new AccountBalanceDto("ADA", "ADA", 1m, 0m, 0.5m, IsDust: true), valued[5]); // below ordermin 5
+    }
+
+    [Theory]
+    [InlineData(0.0001, 60000, false)]   // exactly ordermin, $6 ≥ costmin
+    [InlineData(0.00009, 60000, true)]   // below ordermin
+    [InlineData(0.0001, 4000, true)]     // $0.40 < costmin $0.50
+    public void IsDust_UsesOrderMinAndCostMin(double balance, double bid, bool expected)
+    {
+        var pair = new PairInfo("XXBTZUSD", "XBTUSD", 1, 8, 0.0001m, 0.5m, "XXBT", "ZUSD");
+        Assert.Equal(expected, AccountValuation.IsDust((decimal)balance, pair, (decimal)bid));
+    }
 }

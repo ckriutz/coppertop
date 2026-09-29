@@ -39,7 +39,7 @@ services:
       COPPERTOP_API_URL: http://api:8080
       COPPERTOP_API_KEY: ${COPPERTOP_API_KEY:-}
     ports:
-      - "8080:80"
+      - "8089:80"
     restart: unless-stopped
 
 volumes:

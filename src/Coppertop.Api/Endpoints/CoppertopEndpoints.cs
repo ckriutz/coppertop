@@ -16,7 +16,67 @@ public static class CoppertopEndpoints
         MapTrades(app);
         MapTokenUsage(app);
         MapSummary(app);
+        MapStats(app);
+        MapControl(app);
+        MapAccount(app);
     }
+
+    private static void MapAccount(WebApplication app)
+    {
+        var group = app.MapGroup("/account");
+
+        group.MapGet("/", (Database db) =>
+        {
+            using var c = db.Open();
+            var status = c.QuerySingle<AccountStatus>("SELECT synced_at, error, error_at FROM account_status WHERE id = 1");
+            var balances = c.Query<AccountBalance>("SELECT * FROM account_balances")
+                .OrderByDescending(b => b.ValueUsd ?? -1).ThenBy(b => b.DisplayName).ToList();
+            var cash = balances.Where(IsUsd).ToList();
+            return Results.Ok(new Account(
+                status.SyncedAt is not null,
+                status.SyncedAt,
+                status.Error,
+                status.ErrorAt,
+                balances.Sum(b => b.ValueUsd ?? 0m),
+                cash.Sum(b => b.Balance),
+                cash.Sum(b => b.Available),
+                balances.Count(b => b.PriceUsd is null),
+                balances.Count(b => b.IsDust),
+                balances.Where(b => b.IsDust).Sum(b => b.ValueUsd ?? 0m),
+                balances));
+        });
+
+        // The Trader posts the latest Kraken balances (a full replacement) or the error it hit reading them.
+        group.MapPost("/", (Database db, TimeProvider clock, AccountSnapshotRequest req) =>
+        {
+            var errors = Validation.AccountSnapshot(req);
+            if (errors.Count > 0) return Results.ValidationProblem(errors);
+
+            var now = Database.Ts(clock.GetUtcNow());
+            using var c = db.Open();
+            using var tx = c.BeginTransaction();
+            if (req.Balances is { } balances)
+            {
+                c.Execute("DELETE FROM account_balances", transaction: tx);
+                foreach (var b in balances)
+                {
+                    c.Execute("""
+                        INSERT INTO account_balances (asset, display_name, balance, hold, price_usd, is_dust, updated_at)
+                        VALUES (@asset, @DisplayName, @Balance, @Hold, @PriceUsd, @IsDust, @now)
+                        """, new { asset = Normalize(b.Asset), b.DisplayName, b.Balance, b.Hold, b.PriceUsd, b.IsDust, now }, tx);
+                }
+                c.Execute("UPDATE account_status SET synced_at = @now, error = NULL, error_at = NULL WHERE id = 1", new { now }, tx);
+            }
+            else
+            {
+                c.Execute("UPDATE account_status SET error = @Error, error_at = @now WHERE id = 1", new { req.Error, now }, tx);
+            }
+            tx.Commit();
+            return Results.NoContent();
+        });
+    }
+
+    private static bool IsUsd(AccountBalance b) => b.Asset.Split('.')[0] is "ZUSD" or "USD";
 
     private static void MapOpportunities(WebApplication app)
     {
@@ -437,6 +497,122 @@ public static class CoppertopEndpoints
             return Results.Ok(new Summary(
                 from, (int)closed.Count, (int)closed.Wins, pnl, (decimal)closed.Fees, tokenCost, pnl - tokenCost,
                 (int)open.Count, (decimal)open.Exposure, (int)activeOpps));
+        });
+    }
+
+    private static void MapStats(WebApplication app)
+    {
+        app.MapGet("/stats", (Database db, DateTimeOffset? since) =>
+        {
+            var from = since ?? DateTimeOffset.UnixEpoch;
+            using var c = db.Open();
+            var closed = c.Query<Position>(
+                "SELECT * FROM positions WHERE status = @closed AND closed_at >= @since",
+                new { closed = PositionStatus.Closed, since = Database.Ts(from) }).ToList();
+            var entries = c.Query<(string Status, long Count)>("""
+                SELECT status, COUNT(*) FROM orders
+                WHERE side = 'buy' AND purpose = 'entry' AND created_at >= @since GROUP BY status
+                """, new { since = Database.Ts(from) }).ToDictionary(x => x.Status, x => (int)x.Count);
+
+            var pnls = closed.Select(p => p.RealizedPnlUsd ?? 0m).ToList();
+            var wins = pnls.Where(v => v > 0).ToList();
+            var losses = pnls.Where(v => v <= 0).ToList();
+            var grossProfit = wins.Sum();
+            var grossLoss = -losses.Sum();
+
+            var filled = entries.GetValueOrDefault(OrderStatuses.Filled);
+            var cancelled = entries.GetValueOrDefault(OrderStatuses.Cancelled);
+            var open = entries.GetValueOrDefault(OrderStatuses.Open);
+
+            return Results.Ok(new Stats(
+                from,
+                closed.Count,
+                wins.Count,
+                losses.Count,
+                closed.Count == 0 ? null : 100m * wins.Count / closed.Count,
+                grossProfit,
+                grossLoss,
+                grossLoss == 0 ? null : grossProfit / grossLoss,
+                pnls.Count == 0 ? null : pnls.Average(),
+                wins.Count == 0 ? null : wins.Average(),
+                losses.Count == 0 ? null : losses.Average(),
+                pnls.Count == 0 ? null : pnls.Max(),
+                pnls.Count == 0 ? null : pnls.Min(),
+                closed.Count == 0 ? null : (decimal)closed.Average(p => (p.ClosedAt!.Value - p.OpenedAt).TotalMinutes),
+                closed.GroupBy(p => p.CloseReason ?? "unknown")
+                    .Select(g => new ReasonStats(g.Key, g.Count(), g.Sum(p => p.RealizedPnlUsd ?? 0m)))
+                    .OrderByDescending(r => r.Count).ToList(),
+                new EntryOrderStats(filled, cancelled, open,
+                    filled + cancelled == 0 ? null : 100m * filled / (filled + cancelled))));
+        });
+    }
+
+    private static void MapControl(WebApplication app)
+    {
+        const string select = "SELECT * FROM trader_control WHERE id = 1";
+
+        app.MapGet("/marks", (Database db) =>
+        {
+            using var c = db.Open();
+            return Results.Ok(c.Query<Mark>("SELECT * FROM marks ORDER BY asset"));
+        });
+
+        var group = app.MapGroup("/control");
+
+        group.MapGet("/", (Database db) =>
+        {
+            using var c = db.Open();
+            return Results.Ok(c.QuerySingle<TraderControl>(select));
+        });
+
+        // Pausing stops new entries (and the Trader cancels resting ones); exits keep running.
+        group.MapPut("/", (Database db, TimeProvider clock, UpdateControlRequest req) =>
+        {
+            using var c = db.Open();
+            c.Execute("UPDATE trader_control SET entries_paused = @EntriesPaused, updated_at = @now WHERE id = 1",
+                new { req.EntriesPaused, now = Database.Ts(clock.GetUtcNow()) });
+            return Results.Ok(c.QuerySingle<TraderControl>(select));
+        });
+
+        // Kill switch: pause entries and ask the Trader to sell everything at market on its next cycle.
+        group.MapPost("/flatten", (Database db, TimeProvider clock) =>
+        {
+            using var c = db.Open();
+            c.Execute("UPDATE trader_control SET entries_paused = 1, flatten_requested = 1, updated_at = @now WHERE id = 1",
+                new { now = Database.Ts(clock.GetUtcNow()) });
+            return Results.Ok(c.QuerySingle<TraderControl>(select));
+        });
+
+        group.MapPost("/flatten/ack", (Database db, TimeProvider clock) =>
+        {
+            using var c = db.Open();
+            c.Execute("UPDATE trader_control SET flatten_requested = 0, updated_at = @now WHERE id = 1",
+                new { now = Database.Ts(clock.GetUtcNow()) });
+            return Results.Ok(c.QuerySingle<TraderControl>(select));
+        });
+
+        group.MapPost("/heartbeat", (Database db, TimeProvider clock, HeartbeatRequest req) =>
+        {
+            var errors = Validation.Heartbeat(req);
+            if (errors.Count > 0) return Results.ValidationProblem(errors);
+
+            var now = Database.Ts(clock.GetUtcNow());
+            using var c = db.Open();
+            using var tx = c.BeginTransaction();
+            foreach (var m in req.Marks ?? [])
+            {
+                c.Execute("""
+                    INSERT INTO marks (asset, bid, ask, last, updated_at) VALUES (@asset, @Bid, @Ask, @Last, @now)
+                    ON CONFLICT(asset) DO UPDATE SET bid = excluded.bid, ask = excluded.ask, last = excluded.last, updated_at = excluded.updated_at
+                    """, new { asset = Normalize(m.Asset), m.Bid, m.Ask, m.Last, now }, tx);
+            }
+            c.Execute("""
+                UPDATE trader_control SET last_seen_at = @now, mode = @Mode,
+                    paper_starting_cash_usd = @PaperStartingCashUsd, cycle_seconds = @CycleSeconds
+                WHERE id = 1
+                """, new { now, req.Mode, req.PaperStartingCashUsd, req.CycleSeconds }, tx);
+            tx.Commit();
+            return Results.Ok(c.QuerySingle<TraderControl>(select));
         });
     }
 

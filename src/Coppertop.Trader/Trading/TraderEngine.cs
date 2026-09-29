@@ -44,8 +44,10 @@ public sealed class TraderEngine
         IReadOnlyList<OrderDto> openOrders;
         IReadOnlyList<VetoDto> vetoes;
         SummaryDto summary;
+        ControlDto control;
         try
         {
+            control = await _api.GetControlAsync(ct);
             opportunities = await _api.GetActiveOpportunitiesAsync(ct);
             positions = await _api.GetOpenPositionsAsync(ct);
             openOrders = await _api.GetOpenOrdersAsync(ct);
@@ -67,18 +69,34 @@ public sealed class TraderEngine
         {
             _log.LogInformation("No opportunities, open orders or open positions.");
             _tape.Retain([]);
+            if (control.FlattenRequested) await _api.AckFlattenAsync(ct);
+            await HeartbeatAsync(new Dictionary<string, Ticker>(), ct);
             return;
         }
 
         var pairs = await _kraken.EnsurePairsAsync(assets, ct);
         var tickers = await _kraken.GetTickersAsync(assets, ct);
+        await HeartbeatAsync(tickers, ct);
+
+        if (control.FlattenRequested)
+        {
+            await FlattenAsync(positions, openOrders, tickers, pairs, ct);
+            return;
+        }
+
         var trades = await LoadTradesAsync(positions, openOrders, ct);
         var vetoed = vetoes.Select(v => v.Asset).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-        var (filled, pending) = await ProcessOpenOrdersAsync(openOrders, tickers, trades, pairs, vetoed, ct);
+        var (filled, pending) = await ProcessOpenOrdersAsync(openOrders, tickers, trades, pairs, vetoed, control.EntriesPaused, ct);
 
         // Positions filled this cycle are checked against the same trade batch (only prints after their fill count).
         var closedThisCycle = await ManageExitsAsync(positions.Concat(filled).ToList(), tickers, trades, pairs, ct);
+
+        if (control.EntriesPaused)
+        {
+            _log.LogInformation("Entries paused from the dashboard; managing exits only.");
+            return;
+        }
 
         var stillOpen = positions.Concat(filled).Where(p => !closedThisCycle.Contains(p.Id)).ToList();
         // Pending buys reserve cash and count as positions so we can't over-commit while waiting for fills.
@@ -161,6 +179,7 @@ public sealed class TraderEngine
         IReadOnlyDictionary<string, IReadOnlyList<PublicTrade>> trades,
         IReadOnlyDictionary<string, PairInfo> pairs,
         HashSet<string> vetoed,
+        bool entriesPaused,
         CancellationToken ct)
     {
         var filled = new List<PositionDto>();
@@ -187,7 +206,7 @@ public sealed class TraderEngine
                 continue;
             }
 
-            var cancelReason = PaperFills.EntryCancelReason(order, ticker, vetoed.Contains(order.Asset), now, _o);
+            var cancelReason = PaperFills.EntryCancelReason(order, ticker, vetoed.Contains(order.Asset), entriesPaused, now, _o);
             if (cancelReason is not null)
             {
                 await CancelAsync(order, cancelReason, ct);
@@ -246,21 +265,73 @@ public sealed class TraderEngine
             if (fill is null) continue;
 
             // TP is a resting maker limit; SL is a taker market sell.
-            var (feePct, orderType) = fill.Reason == "take_profit" ? (_o.MakerFeePct, "limit") : (_o.TakerFeePct, "market");
-            var fee = FeeMath.Fee(fill.Price * position.Volume, feePct);
-
-            var order = await _api.CreateOrderAsync(new CreateOrderDto(
-                position.OpportunityId, position.Id, position.Asset, "sell", orderType, fill.Reason,
-                fill.Price, position.Volume, "open", null, true, null), ct);
-            var result = await _api.TryFillOrderAsync(order.Id, new FillOrderDto(
-                fill.Price, position.Volume, fee, fill.ExecutedAt, null, null, $"paper fill: {fill.Evidence}"), ct);
-            if (result is null) continue;
-
-            closed.Add(position.Id);
-            _log.LogInformation("{Asset}: closed position {Id} via {Reason} at {Price} ({Evidence}, fee {Fee:F4})",
-                position.Asset, position.Id, fill.Reason, fill.Price, fill.Evidence, fee);
+            if (await CloseAsync(position, fill, ct)) closed.Add(position.Id);
         }
         return closed;
+    }
+
+    private async Task<bool> CloseAsync(PositionDto position, PaperFill fill, CancellationToken ct)
+    {
+        var (feePct, orderType) = fill.Reason == "take_profit" ? (_o.MakerFeePct, "limit") : (_o.TakerFeePct, "market");
+        var fee = FeeMath.Fee(fill.Price * position.Volume, feePct);
+
+        var order = await _api.CreateOrderAsync(new CreateOrderDto(
+            position.OpportunityId, position.Id, position.Asset, "sell", orderType, fill.Reason,
+            fill.Price, position.Volume, "open", null, true, null), ct);
+        var result = await _api.TryFillOrderAsync(order.Id, new FillOrderDto(
+            fill.Price, position.Volume, fee, fill.ExecutedAt, null, null, $"paper fill: {fill.Evidence}"), ct);
+        if (result is null)
+        {
+            await _api.TryCancelOrderAsync(order.Id, "position already closed", ct);
+            return false;
+        }
+
+        _log.LogInformation("{Asset}: closed position {Id} via {Reason} at {Price} ({Evidence}, fee {Fee:F4})",
+            position.Asset, position.Id, fill.Reason, fill.Price, fill.Evidence, fee);
+        return true;
+    }
+
+    /// <summary>Kill switch: cancel every resting order and market-sell every position, then acknowledge.</summary>
+    private async Task FlattenAsync(
+        IReadOnlyList<PositionDto> positions,
+        IReadOnlyList<OrderDto> openOrders,
+        IReadOnlyDictionary<string, Ticker> tickers,
+        IReadOnlyDictionary<string, PairInfo> pairs,
+        CancellationToken ct)
+    {
+        _log.LogWarning("FLATTEN requested: cancelling {Orders} order(s) and closing {Positions} position(s)",
+            openOrders.Count, positions.Count);
+        foreach (var order in openOrders) await CancelAsync(order, "flatten", ct);
+
+        var leftOver = 0;
+        var now = _clock.GetUtcNow();
+        foreach (var position in positions)
+        {
+            if (!tickers.TryGetValue(position.Asset, out var ticker))
+            {
+                _log.LogWarning("{Asset}: no price, can't flatten position {Id} yet", position.Asset, position.Id);
+                leftOver++;
+                continue;
+            }
+            var decimals = pairs.TryGetValue(position.Asset, out var pair) ? pair.PriceDecimals : 8;
+            await CloseAsync(position, PaperFlatten.Exit(ticker, now, _o.StopLossSlippagePct, decimals), ct);
+        }
+
+        // Only acknowledge once everything is out; otherwise retry next cycle.
+        if (leftOver == 0) await _api.AckFlattenAsync(ct);
+    }
+
+    private async Task HeartbeatAsync(IReadOnlyDictionary<string, Ticker> tickers, CancellationToken ct)
+    {
+        try
+        {
+            var marks = tickers.Values.Select(t => new MarkDto(t.AltName, t.Bid, t.Ask, t.Last)).ToList();
+            await _api.SendHeartbeatAsync(new HeartbeatDto(_o.Mode, _o.PaperStartingCashUsd, _o.CycleSeconds, marks), ct);
+        }
+        catch (HttpRequestException ex)
+        {
+            _log.LogWarning("Couldn't send heartbeat/marks: {Message}", ex.Message);
+        }
     }
 
     private async Task<bool> PlaceEntryAsync(OpportunityDto opp, PairInfo pair, EntryPlan plan, CancellationToken ct)

@@ -98,6 +98,16 @@ public sealed record CreateTradeDto(
     bool IsSimulated,
     DateTimeOffset? ExecutedAt);
 
+public sealed record ControlDto(bool EntriesPaused, bool FlattenRequested);
+
+public sealed record MarkDto(string Asset, decimal Bid, decimal Ask, decimal Last);
+
+public sealed record HeartbeatDto(string Mode, decimal PaperStartingCashUsd, int CycleSeconds, IReadOnlyList<MarkDto> Marks);
+
+public sealed record AccountBalanceDto(string Asset, string DisplayName, decimal Balance, decimal Hold, decimal? PriceUsd, bool IsDust = false);
+
+public sealed record AccountSnapshotDto(IReadOnlyList<AccountBalanceDto>? Balances, string? Error);
+
 public sealed record SummaryDto(decimal RealizedPnlUsd, decimal OpenExposureUsd, int OpenPositions);
 
 public sealed class CoppertopApiClient
@@ -170,6 +180,28 @@ public sealed class CoppertopApiClient
     public async Task CreateTradeAsync(CreateTradeDto dto, CancellationToken ct)
     {
         using var res = await _http.PostAsJsonAsync("/trades", dto, ct);
+        await EnsureSuccessAsync(res, ct);
+    }
+
+    public async Task<ControlDto> GetControlAsync(CancellationToken ct) =>
+        await _http.GetFromJsonAsync<ControlDto>("/control", ct)
+        ?? throw new InvalidOperationException("Empty control response.");
+
+    public async Task AckFlattenAsync(CancellationToken ct)
+    {
+        using var res = await _http.PostAsync("/control/flatten/ack", null, ct);
+        await EnsureSuccessAsync(res, ct);
+    }
+
+    public async Task SendHeartbeatAsync(HeartbeatDto dto, CancellationToken ct)
+    {
+        using var res = await _http.PostAsJsonAsync("/control/heartbeat", dto, ct);
+        await EnsureSuccessAsync(res, ct);
+    }
+
+    public async Task PostAccountAsync(AccountSnapshotDto dto, CancellationToken ct)
+    {
+        using var res = await _http.PostAsJsonAsync("/account", dto, ct);
         await EnsureSuccessAsync(res, ct);
     }
 

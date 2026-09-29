@@ -5,7 +5,7 @@ namespace Coppertop.Api.Endpoints;
 public static class Validation
 {
     private static readonly string[] Sides = ["buy", "sell"];
-    private static readonly string[] OrderPurposes = ["entry", "take_profit", "stop_loss", "manual"];
+    private static readonly string[] OrderPurposes = ["entry", "take_profit", "stop_loss", "flatten", "manual"];
 
     public static Dictionary<string, string[]> Opportunity(CreateOpportunityRequest r, DateTimeOffset now)
     {
@@ -92,6 +92,29 @@ public static class Validation
         e.Require(r.Price > 0, "price", "Must be > 0.");
         e.Require(r.Volume > 0, "volume", "Must be > 0.");
         e.Require(r.FeeUsd >= 0, "feeUsd", "Must be >= 0.");
+        return e.Result;
+    }
+
+    public static Dictionary<string, string[]> Heartbeat(HeartbeatRequest r)
+    {
+        var e = new Errors();
+        e.Require(!string.IsNullOrWhiteSpace(r.Mode), "mode", "Required.");
+        e.Require(r.CycleSeconds > 0, "cycleSeconds", "Must be > 0.");
+        e.Require(r.PaperStartingCashUsd >= 0, "paperStartingCashUsd", "Must be >= 0.");
+        e.Require((r.Marks ?? []).All(m => !string.IsNullOrWhiteSpace(m.Asset) && m.Bid > 0 && m.Ask > 0 && m.Last > 0),
+            "marks", "Each mark needs an asset and positive bid, ask and last.");
+        return e.Result;
+    }
+
+    public static Dictionary<string, string[]> AccountSnapshot(AccountSnapshotRequest r)
+    {
+        var e = new Errors();
+        e.Require(r.Balances is not null || !string.IsNullOrWhiteSpace(r.Error), "balances", "Send balances or an error.");
+        var b = r.Balances ?? [];
+        e.Require(b.All(x => !string.IsNullOrWhiteSpace(x.Asset) && !string.IsNullOrWhiteSpace(x.DisplayName)),
+            "balances", "Each balance needs an asset and display name.");
+        e.Require(b.All(x => x.Hold >= 0 && x.PriceUsd is null or >= 0), "balances", "Hold and price must be >= 0.");
+        e.Require(b.Select(x => (x.Asset ?? "").Trim().ToUpperInvariant()).Distinct().Count() == b.Count, "balances", "Duplicate asset.");
         return e.Result;
     }
 

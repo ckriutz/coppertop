@@ -97,6 +97,71 @@ export interface TokenUsage {
   createdAt: string
 }
 
+export interface Mark {
+  asset: string
+  bid: number
+  ask: number
+  last: number
+  updatedAt: string
+}
+
+export interface Control {
+  entriesPaused: boolean
+  flattenRequested: boolean
+  updatedAt: string
+  lastSeenAt: string | null
+  mode: string | null
+  paperStartingCashUsd: number | null
+  cycleSeconds: number | null
+}
+
+export interface Stats {
+  since: string
+  closedPositions: number
+  wins: number
+  losses: number
+  winRatePct: number | null
+  grossProfitUsd: number
+  grossLossUsd: number
+  profitFactor: number | null
+  avgPnlUsd: number | null
+  avgWinUsd: number | null
+  avgLossUsd: number | null
+  bestUsd: number | null
+  worstUsd: number | null
+  avgHoldMinutes: number | null
+  byReason: { reason: string; count: number; pnlUsd: number }[]
+  entryOrders: { filled: number; cancelled: number; open: number; fillRatePct: number | null }
+}
+
+export interface AccountBalance {
+  asset: string
+  displayName: string
+  balance: number
+  hold: number
+  available: number
+  priceUsd: number | null
+  valueUsd: number | null
+  /** Too small to sell on Kraken (below the pair's minimum order size or value). */
+  isDust: boolean
+  updatedAt: string
+}
+
+/** The real Kraken account, read-only, as last synced by the Trader. */
+export interface Account {
+  connected: boolean
+  syncedAt: string | null
+  error: string | null
+  errorAt: string | null
+  totalUsd: number
+  cashUsd: number
+  cashAvailableUsd: number
+  unpricedAssets: number
+  dustAssets: number
+  dustUsd: number
+  balances: AccountBalance[]
+}
+
 export interface Dashboard {
   summary: Summary
   openPositions: Position[]
@@ -106,6 +171,10 @@ export interface Dashboard {
   opportunities: Opportunity[]
   vetoes: Veto[]
   tokenUsage: TokenUsage[]
+  marks: Record<string, Mark>
+  control: Control
+  stats: Stats
+  account: Account
 }
 
 async function get<T>(path: string, signal?: AbortSignal): Promise<T> {
@@ -114,8 +183,22 @@ async function get<T>(path: string, signal?: AbortSignal): Promise<T> {
   return (await res.json()) as T
 }
 
+async function send<T>(method: 'POST' | 'PUT', path: string, body?: unknown): Promise<T> {
+  const res = await fetch(`/api${path}`, {
+    method,
+    headers: { Accept: 'application/json', ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  })
+  if (!res.ok) throw new Error(`${path}: HTTP ${res.status}`)
+  return (await res.json()) as T
+}
+
+export const setEntriesPaused = (entriesPaused: boolean) => send<Control>('PUT', '/control', { entriesPaused })
+
+export const requestFlatten = () => send<Control>('POST', '/control/flatten')
+
 export async function loadDashboard(signal?: AbortSignal): Promise<Dashboard> {
-  const [summary, openPositions, positions, orders, trades, opportunities, vetoes, tokenUsage] = await Promise.all([
+  const [summary, openPositions, positions, orders, trades, opportunities, vetoes, tokenUsage, marks, control, stats, account] = await Promise.all([
     get<Summary>('/summary', signal),
     get<Position[]>('/positions?status=open', signal),
     get<Position[]>('/positions', signal),
@@ -124,6 +207,14 @@ export async function loadDashboard(signal?: AbortSignal): Promise<Dashboard> {
     get<Opportunity[]>('/opportunities?active=true', signal),
     get<Veto[]>('/vetoes?active=true', signal),
     get<TokenUsage[]>('/token-usage', signal),
+    get<Mark[]>('/marks', signal),
+    get<Control>('/control', signal),
+    get<Stats>('/stats', signal),
+    get<Account>('/account', signal),
   ])
-  return { summary, openPositions, positions, orders, trades, opportunities, vetoes, tokenUsage }
+  return {
+    summary, openPositions, positions, orders, trades, opportunities, vetoes, tokenUsage,
+    marks: Object.fromEntries(marks.map((m) => [m.asset, m])),
+    control, stats, account,
+  }
 }

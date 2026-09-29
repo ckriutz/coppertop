@@ -206,3 +206,90 @@ public sealed record Summary(
     int OpenPositions,
     decimal OpenExposureUsd,
     int ActiveOpportunities);
+
+public sealed class Mark
+{
+    public string Asset { get; set; } = "";
+    public decimal Bid { get; set; }
+    public decimal Ask { get; set; }
+    public decimal Last { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
+}
+
+public sealed class TraderControl
+{
+    public bool EntriesPaused { get; set; }
+    public bool FlattenRequested { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
+    public DateTimeOffset? LastSeenAt { get; set; }
+    public string? Mode { get; set; }
+    public decimal? PaperStartingCashUsd { get; set; }
+    public int? CycleSeconds { get; set; }
+}
+
+public sealed record UpdateControlRequest(bool EntriesPaused);
+
+public sealed class AccountBalance
+{
+    public string Asset { get; set; } = "";
+    public string DisplayName { get; set; } = "";
+    public decimal Balance { get; set; }
+    public decimal Hold { get; set; }
+    public decimal Available => Balance - Hold;
+    public decimal? PriceUsd { get; set; }
+    public decimal? ValueUsd => PriceUsd is { } p ? Balance * p : null;
+    /// <summary>Too small to sell on Kraken (below the pair's minimum order size or value).</summary>
+    public bool IsDust { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
+}
+
+public sealed class AccountStatus
+{
+    public DateTimeOffset? SyncedAt { get; set; }
+    public string? Error { get; set; }
+    public DateTimeOffset? ErrorAt { get; set; }
+}
+
+public sealed record Account(
+    bool Connected,
+    DateTimeOffset? SyncedAt,
+    string? Error,
+    DateTimeOffset? ErrorAt,
+    decimal TotalUsd,
+    decimal CashUsd,
+    decimal CashAvailableUsd,
+    int UnpricedAssets,
+    int DustAssets,
+    decimal DustUsd,
+    IReadOnlyList<AccountBalance> Balances);
+
+public sealed record AccountBalanceRequest(string Asset, string DisplayName, decimal Balance, decimal Hold, decimal? PriceUsd, bool IsDust = false);
+
+/// <summary>Either a full snapshot (Balances) or just an Error; an error alone keeps the last good balances.</summary>
+public sealed record AccountSnapshotRequest(IReadOnlyList<AccountBalanceRequest>? Balances, string? Error);
+
+public sealed record MarkRequest(string Asset, decimal Bid, decimal Ask, decimal Last);
+
+public sealed record HeartbeatRequest(string Mode, decimal PaperStartingCashUsd, int CycleSeconds, IReadOnlyList<MarkRequest>? Marks);
+
+public sealed record ReasonStats(string Reason, int Count, decimal PnlUsd);
+
+public sealed record EntryOrderStats(int Filled, int Cancelled, int Open, decimal? FillRatePct);
+
+public sealed record Stats(
+    DateTimeOffset Since,
+    int ClosedPositions,
+    int Wins,
+    int Losses,
+    decimal? WinRatePct,
+    decimal GrossProfitUsd,
+    decimal GrossLossUsd,
+    decimal? ProfitFactor,
+    decimal? AvgPnlUsd,
+    decimal? AvgWinUsd,
+    decimal? AvgLossUsd,
+    decimal? BestUsd,
+    decimal? WorstUsd,
+    decimal? AvgHoldMinutes,
+    IReadOnlyList<ReasonStats> ByReason,
+    EntryOrderStats EntryOrders);

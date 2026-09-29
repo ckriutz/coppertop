@@ -1,4 +1,5 @@
 using Coppertop.Trader;
+using Coppertop.Trader.Account;
 using Coppertop.Trader.Api;
 using Coppertop.Trader.Kraken;
 using Coppertop.Trader.Trading;
@@ -21,5 +22,6 @@ builder.Services.AddHttpClient<KrakenClient>(c => c.Timeout = TimeSpan.FromSecon
 builder.Services.AddHttpClient<CoppertopApiClient>(c => c.Timeout = TimeSpan.FromSeconds(10));
 builder.Services.AddScoped<TraderEngine>();
 builder.Services.AddHostedService<Worker>();
+builder.Services.AddHostedService<AccountWorker>();
 
 builder.Build().Run();

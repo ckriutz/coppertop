@@ -6,7 +6,11 @@ public sealed record PairInfo(
     int PriceDecimals,
     int LotDecimals,
     decimal OrderMin,
-    decimal CostMin);
+    decimal CostMin,
+    string Base = "",
+    string Quote = "");
+
+public sealed record KrakenBalance(string Asset, decimal Balance, decimal HoldTrade);
 
 public sealed record Ticker(string AltName, decimal Ask, decimal Bid, decimal Last)
 {

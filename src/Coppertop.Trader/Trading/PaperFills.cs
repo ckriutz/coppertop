@@ -24,8 +24,9 @@ public static class PaperFills
     }
 
     /// <summary>Why a still-unfilled entry order should be cancelled, or null to keep waiting.</summary>
-    public static string? EntryCancelReason(OrderDto order, Ticker? ticker, bool vetoed, DateTimeOffset now, TraderOptions o)
+    public static string? EntryCancelReason(OrderDto order, Ticker? ticker, bool vetoed, bool entriesPaused, DateTimeOffset now, TraderOptions o)
     {
+        if (entriesPaused) return "entries paused";
         if (vetoed) return "asset vetoed";
         if (now - order.CreatedAt >= TimeSpan.FromMinutes(o.EntryOrderTimeoutMinutes))
             return $"not filled within {o.EntryOrderTimeoutMinutes}m";
@@ -71,6 +72,14 @@ public static class PaperFills
 
         return null;
     }
+}
+
+/// <summary>Kill-switch exit: taker market sell at the bid less slippage.</summary>
+public static class PaperFlatten
+{
+    public static PaperFill Exit(Ticker ticker, DateTimeOffset now, decimal slippagePct, int priceDecimals) =>
+        new("flatten", Math.Round(ticker.Bid * (1m - slippagePct / 100m), priceDecimals, MidpointRounding.ToZero), now,
+            $"flatten at bid {ticker.Bid}");
 }
 
 /// <summary>

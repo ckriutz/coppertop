@@ -9,6 +9,7 @@ public sealed class KrakenPairCache
 {
     public System.Collections.Concurrent.ConcurrentDictionary<string, PairInfo> ByAlt { get; } = new(StringComparer.OrdinalIgnoreCase);
     public System.Collections.Concurrent.ConcurrentDictionary<string, PairInfo> ByKey { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public DateTimeOffset AllLoadedAt { get; set; } = DateTimeOffset.MinValue;
 }
 
 public sealed class KrakenClient
@@ -33,23 +34,38 @@ public sealed class KrakenClient
     {
         var missing = altNames.Where(a => !_pairs.ByAlt.ContainsKey(a)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         if (missing.Count > 0)
-        {
-            var result = await GetPublicAsync($"/0/public/AssetPairs?pair={string.Join(',', missing)}", ct);
-            foreach (var prop in result.EnumerateObject())
-            {
-                var v = prop.Value;
-                var info = new PairInfo(
-                    prop.Name,
-                    v.GetProperty("altname").GetString()!,
-                    v.GetProperty("pair_decimals").GetInt32(),
-                    v.GetProperty("lot_decimals").GetInt32(),
-                    ParseDecimal(v, "ordermin"),
-                    ParseDecimal(v, "costmin"));
-                _pairs.ByAlt[info.AltName] = info;
-                _pairs.ByKey[info.Key] = info;
-            }
-        }
+            StorePairs(await GetPublicAsync($"/0/public/AssetPairs?pair={string.Join(',', missing)}", ct));
         return _pairs.ByAlt;
+    }
+
+    /// <summary>Every Kraken pair (~700 KB), refreshed at most daily. Used to find a USD price for any balance.</summary>
+    public async Task<IReadOnlyCollection<PairInfo>> GetAllPairsAsync(CancellationToken ct)
+    {
+        if (DateTimeOffset.UtcNow - _pairs.AllLoadedAt > TimeSpan.FromHours(24))
+        {
+            StorePairs(await GetPublicAsync("/0/public/AssetPairs", ct));
+            _pairs.AllLoadedAt = DateTimeOffset.UtcNow;
+        }
+        return _pairs.ByKey.Values.ToList();
+    }
+
+    private void StorePairs(JsonElement result)
+    {
+        foreach (var prop in result.EnumerateObject())
+        {
+            var v = prop.Value;
+            var info = new PairInfo(
+                prop.Name,
+                v.GetProperty("altname").GetString()!,
+                v.GetProperty("pair_decimals").GetInt32(),
+                v.GetProperty("lot_decimals").GetInt32(),
+                ParseDecimal(v, "ordermin"),
+                ParseDecimal(v, "costmin"),
+                v.TryGetProperty("base", out var b) ? b.GetString() ?? "" : "",
+                v.TryGetProperty("quote", out var q) ? q.GetString() ?? "" : "");
+            _pairs.ByAlt[info.AltName] = info;
+            _pairs.ByKey[info.Key] = info;
+        }
     }
 
     public async Task<IReadOnlyDictionary<string, Ticker>> GetTickersAsync(IReadOnlyCollection<string> altNames, CancellationToken ct)
@@ -122,11 +138,14 @@ public sealed class KrakenClient
         return new TradesPage(trades, last);
     }
 
-    public async Task<IReadOnlyDictionary<string, decimal>> GetBalancesAsync(CancellationToken ct)
-    {
-        var result = await PostPrivateAsync("/0/private/Balance", [], ct);
-        return result.EnumerateObject().ToDictionary(p => p.Name, p => ParseDecimal(p.Value));
-    }
+    /// <summary>Private BalanceEx: every asset with its total balance and the amount held by open orders.</summary>
+    public async Task<IReadOnlyList<KrakenBalance>> GetBalancesAsync(CancellationToken ct) =>
+        ParseBalances(await PostPrivateAsync("/0/private/BalanceEx", [], ct));
+
+    public static IReadOnlyList<KrakenBalance> ParseBalances(JsonElement result) =>
+        result.EnumerateObject()
+            .Select(p => new KrakenBalance(p.Name, ParseDecimal(p.Value, "balance"), ParseDecimal(p.Value, "hold_trade")))
+            .ToList();
 
     public async Task<AddOrderResult> AddOrderAsync(AddOrderRequest order, PairInfo pair, CancellationToken ct)
     {

@@ -255,6 +255,121 @@ public sealed class ApiTests : IDisposable
         var late = await _client.PostAsJsonAsync($"/orders/{filled.Id}/cancel", new CancelOrderRequest(null));
         Assert.Equal(HttpStatusCode.Conflict, late.StatusCode);
     }
+
+    [Fact]
+    public async Task Control_DefaultsToRunning_AndSupportsPauseFlattenAck()
+    {
+        var initial = (await _client.GetFromJsonAsync<TraderControl>("/control"))!;
+        Assert.False(initial.EntriesPaused);
+        Assert.False(initial.FlattenRequested);
+        Assert.Null(initial.LastSeenAt);
+
+        var paused = (await (await _client.PutAsJsonAsync("/control", new UpdateControlRequest(true)))
+            .Content.ReadFromJsonAsync<TraderControl>())!;
+        Assert.True(paused.EntriesPaused);
+
+        await _client.PutAsJsonAsync("/control", new UpdateControlRequest(false));
+        var flatten = (await (await _client.PostAsync("/control/flatten", null)).Content.ReadFromJsonAsync<TraderControl>())!;
+        Assert.True(flatten.FlattenRequested);
+        Assert.True(flatten.EntriesPaused);
+
+        var acked = (await (await _client.PostAsync("/control/flatten/ack", null)).Content.ReadFromJsonAsync<TraderControl>())!;
+        Assert.False(acked.FlattenRequested);
+        Assert.True(acked.EntriesPaused);
+    }
+
+    [Fact]
+    public async Task Heartbeat_UpsertsMarks_AndRecordsTraderInfo()
+    {
+        await _client.PostAsJsonAsync("/control/heartbeat", new HeartbeatRequest("Paper", 100m, 30,
+            [new MarkRequest("xbtusd", 50000m, 50001m, 50000.5m), new MarkRequest("ETHUSD", 3000m, 3000.5m, 3000m)]));
+        var res = await _client.PostAsJsonAsync("/control/heartbeat", new HeartbeatRequest("Paper", 100m, 30,
+            [new MarkRequest("XBTUSD", 51000m, 51001m, 51000m)]));
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        var control = (await res.Content.ReadFromJsonAsync<TraderControl>())!;
+        Assert.NotNull(control.LastSeenAt);
+        Assert.Equal("Paper", control.Mode);
+        Assert.Equal(100m, control.PaperStartingCashUsd);
+        Assert.Equal(30, control.CycleSeconds);
+
+        var marks = (await _client.GetFromJsonAsync<List<Mark>>("/marks"))!;
+        Assert.Equal(2, marks.Count);
+        Assert.Equal(51000m, marks.Single(m => m.Asset == "XBTUSD").Bid);
+
+        var bad = await _client.PostAsJsonAsync("/control/heartbeat", new HeartbeatRequest("Paper", 100m, 30,
+            [new MarkRequest("XBTUSD", 0m, 1m, 1m)]));
+        Assert.Equal(HttpStatusCode.BadRequest, bad.StatusCode);
+    }
+
+    [Fact]
+    public async Task Account_SnapshotReplacesBalances_ErrorKeepsThem()
+    {
+        var empty = (await _client.GetFromJsonAsync<Account>("/account"))!;
+        Assert.False(empty.Connected);
+        Assert.Empty(empty.Balances);
+
+        await _client.PostAsJsonAsync("/account", new AccountSnapshotRequest(
+            [new AccountBalanceRequest("OLD", "OLD", 1m, 0m, 1m)], null));
+        var res = await _client.PostAsJsonAsync("/account", new AccountSnapshotRequest(
+        [
+            new AccountBalanceRequest("ZUSD", "USD", 58m, 10m, 1m),
+            new AccountBalanceRequest("XXBT", "XBT", 0.001m, 0m, 60000m),
+            new AccountBalanceRequest("FOO", "FOO", 5m, 0m, null),
+            new AccountBalanceRequest("SOL", "SOL", 0.0001m, 0m, 100m, IsDust: true),
+        ], null));
+        Assert.Equal(HttpStatusCode.NoContent, res.StatusCode);
+
+        var account = (await _client.GetFromJsonAsync<Account>("/account"))!;
+        Assert.True(account.Connected);
+        Assert.Null(account.Error);
+        Assert.Equal(118.01m, account.TotalUsd);
+        Assert.Equal(1, account.DustAssets);
+        Assert.Equal(0.01m, account.DustUsd);
+        Assert.True(account.Balances.Single(b => b.Asset == "SOL").IsDust);
+        Assert.Equal(58m, account.CashUsd);
+        Assert.Equal(48m, account.CashAvailableUsd);
+        Assert.Equal(1, account.UnpricedAssets);
+        Assert.Equal(["XXBT", "ZUSD", "SOL", "FOO"], account.Balances.Select(b => b.Asset));
+
+        await _client.PostAsJsonAsync("/account", new AccountSnapshotRequest(null, "EGeneral:Permission denied"));
+        var failed = (await _client.GetFromJsonAsync<Account>("/account"))!;
+        Assert.Equal("EGeneral:Permission denied", failed.Error);
+        Assert.NotNull(failed.ErrorAt);
+        Assert.Equal(4, failed.Balances.Count);
+
+        var bad = await _client.PostAsJsonAsync("/account", new AccountSnapshotRequest(null, null));
+        Assert.Equal(HttpStatusCode.BadRequest, bad.StatusCode);
+    }
+
+    [Fact]
+    public async Task Stats_SummarizeClosedPositionsAndEntryFillRate()
+    {
+        async Task Round(decimal exit, string reason)
+        {
+            var entry = await CreateOrder("buy", "entry");
+            var opened = (await (await _client.PostAsJsonAsync($"/orders/{entry.Id}/fill",
+                new FillOrderRequest(50000m, 0.0002m, 0.025m, null, 50750m, 49000m, null)))
+                .Content.ReadFromJsonAsync<FillOrderResponse>())!;
+            var sell = await CreateOrder("sell", reason, opened.Position.Id, exit);
+            await _client.PostAsJsonAsync($"/orders/{sell.Id}/fill", new FillOrderRequest(exit, 0.0002m, 0m, null, null, null, null));
+        }
+        await Round(51000m, "take_profit"); // +0.175
+        await Round(49000m, "stop_loss");   // -0.225
+        var never = await CreateOrder("buy", "entry");
+        await _client.PostAsJsonAsync($"/orders/{never.Id}/cancel", new CancelOrderRequest("timeout"));
+
+        var stats = (await _client.GetFromJsonAsync<Stats>("/stats"))!;
+        Assert.Equal(2, stats.ClosedPositions);
+        Assert.Equal(1, stats.Wins);
+        Assert.Equal(50m, stats.WinRatePct);
+        Assert.Equal(0.175m, stats.BestUsd!.Value, 5);
+        Assert.Equal(-0.225m, stats.WorstUsd!.Value, 5);
+        Assert.Equal(0.175m / 0.225m, stats.ProfitFactor!.Value, 5);
+        Assert.Equal(2, stats.ByReason.Count);
+        Assert.Equal(2, stats.EntryOrders.Filled);
+        Assert.Equal(1, stats.EntryOrders.Cancelled);
+        Assert.Equal(200m / 3m, stats.EntryOrders.FillRatePct!.Value, 5);
+    }
 }
 
 public sealed class ApiKeyTests : IDisposable
