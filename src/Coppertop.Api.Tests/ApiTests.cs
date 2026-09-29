@@ -342,6 +342,30 @@ public sealed class ApiTests : IDisposable
     }
 
     [Fact]
+    public async Task ResearchScreen_ReplacesResults_AndRoundTripsMetrics()
+    {
+        var metrics = System.Text.Json.JsonDocument.Parse("""{"spreadPct":0.01,"sim":{"wins":5,"losses":1}}""").RootElement;
+        await _client.PostAsJsonAsync("/research/screen", new PublishScreenRequest(
+            [new ScreenResultRequest("OLDUSD", true, 0.5m, "old", null)]));
+        var res = await _client.PostAsJsonAsync("/research/screen", new PublishScreenRequest(
+        [
+            new ScreenResultRequest("ethusd", false, 0.2m, "downtrend", null),
+            new ScreenResultRequest("XBTUSD", true, 0.6m, "dip replay made money", metrics),
+        ]));
+        Assert.Equal(HttpStatusCode.NoContent, res.StatusCode);
+
+        var rows = (await _client.GetFromJsonAsync<List<ScreenResult>>("/research/screen"))!;
+        Assert.Equal(["XBTUSD", "ETHUSD"], rows.Select(r => r.Asset));
+        Assert.True(rows[0].Approved);
+        Assert.Equal(5, rows[0].Metrics!.Value.GetProperty("sim").GetProperty("wins").GetInt32());
+        Assert.Null(rows[1].Metrics);
+
+        var bad = await _client.PostAsJsonAsync("/research/screen", new PublishScreenRequest(
+            [new ScreenResultRequest("XBTUSD", true, 1.5m, "x", null)]));
+        Assert.Equal(HttpStatusCode.BadRequest, bad.StatusCode);
+    }
+
+    [Fact]
     public async Task Stats_SummarizeClosedPositionsAndEntryFillRate()
     {
         async Task Round(decimal exit, string reason)

@@ -118,6 +118,17 @@ public static class Validation
         return e.Result;
     }
 
+    public static Dictionary<string, string[]> Screen(PublishScreenRequest r)
+    {
+        var e = new Errors();
+        var results = r.Results ?? [];
+        e.Require(results.All(x => !string.IsNullOrWhiteSpace(x.Asset) && !string.IsNullOrWhiteSpace(x.Reason)),
+            "results", "Each result needs an asset and a reason.");
+        e.Require(results.All(x => x.Confidence is >= 0 and <= 1), "results", "Confidence must be between 0 and 1.");
+        e.Require(results.Select(x => (x.Asset ?? "").Trim().ToUpperInvariant()).Distinct().Count() == results.Count, "results", "Duplicate asset.");
+        return e.Result;
+    }
+
     public static Dictionary<string, string[]> TokenUsage(CreateTokenUsageRequest r)
     {
         var e = new Errors();

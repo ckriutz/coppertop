@@ -170,6 +170,17 @@ public sealed class Database
             error_at        TEXT NULL
         );
         INSERT OR IGNORE INTO account_status (id) VALUES (1);
+
+        -- Research's latest verdict per watchlist asset, replaced wholesale each cycle. metrics is JSON so Research
+        -- can add fields without a schema change.
+        CREATE TABLE IF NOT EXISTS research_screen (
+            asset        TEXT PRIMARY KEY,
+            approved     INTEGER NOT NULL,
+            confidence   REAL    NOT NULL,
+            reason       TEXT    NOT NULL,
+            metrics      TEXT    NULL,
+            screened_at  TEXT    NOT NULL
+        );
         """;
 
     private sealed class DateTimeOffsetHandler : SqlMapper.TypeHandler<DateTimeOffset>

@@ -263,6 +263,22 @@ public sealed record Account(
     decimal DustUsd,
     IReadOnlyList<AccountBalance> Balances);
 
+public sealed class ScreenRow
+{
+    public string Asset { get; set; } = "";
+    public bool Approved { get; set; }
+    public decimal Confidence { get; set; }
+    public string Reason { get; set; } = "";
+    public string? Metrics { get; set; }
+    public DateTimeOffset ScreenedAt { get; set; }
+}
+
+public sealed record ScreenResult(string Asset, bool Approved, decimal Confidence, string Reason, System.Text.Json.JsonElement? Metrics, DateTimeOffset ScreenedAt);
+
+public sealed record ScreenResultRequest(string Asset, bool Approved, decimal Confidence, string Reason, System.Text.Json.JsonElement? Metrics);
+
+public sealed record PublishScreenRequest(IReadOnlyList<ScreenResultRequest> Results);
+
 public sealed record AccountBalanceRequest(string Asset, string DisplayName, decimal Balance, decimal Hold, decimal? PriceUsd, bool IsDust = false);
 
 /// <summary>Either a full snapshot (Balances) or just an Error; an error alone keeps the last good balances.</summary>

@@ -1,12 +1,13 @@
 using Coppertop.Research.Api;
 using Coppertop.Research.Kraken;
+using Coppertop.Research.Screening;
 using Microsoft.Extensions.Options;
 
 namespace Coppertop.Research;
 
 /// <summary>
-/// STUB research: approves every watchlist asset for dip-buying below its current price.
-/// No LLM / TypeSafe / Sonar yet – that replaces <see cref="ResearchCycleAsync"/> in a later step.
+/// Research cycle, step 1 (no LLM): screen the watchlist with plain code, publish opportunities for the best few,
+/// cancel opportunities for assets that no longer pass, and post every verdict to the Api for the dashboard.
 /// </summary>
 public sealed class Worker(
     IServiceScopeFactory scopes,
@@ -14,10 +15,12 @@ public sealed class Worker(
     TimeProvider clock,
     ILogger<Worker> log) : BackgroundService
 {
+    private const string Strategy = "dip";
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var o = options.Value;
-        log.LogInformation("Research (stub) starting: {Count} assets, every {Minutes} min", o.Watchlist.Count, o.CycleMinutes);
+        log.LogInformation("Research starting: screening {Count} assets every {Minutes} min", o.Watchlist.Count, o.CycleMinutes);
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -54,28 +57,61 @@ public sealed class Worker(
             return;
         }
 
-        var prices = await kraken.GetLastPricesAsync(o.Watchlist, ct);
-        var expires = clock.GetUtcNow().AddHours(o.OpportunityLifetimeHours);
-
+        var tickers = await kraken.GetTickersAsync(o.Watchlist, ct);
+        var results = new List<ScreenResult>();
         foreach (var asset in o.Watchlist)
         {
-            if (!prices.TryGetValue(asset, out var last))
+            if (!tickers.TryGetValue(asset, out var ticker))
             {
-                log.LogWarning("{Asset}: no price from Kraken", asset);
+                results.Add(ScreenResult.Failed(asset, "no ticker from Kraken"));
                 continue;
             }
-
-            var published = await api.PublishOpportunityAsync(new CreateOpportunityDto(
-                asset, "dip", last, o.TakeProfitPct, o.StopLossPct, o.MaxSpendUsd,
-                Confidence: 0.5m,
-                Reason: $"stub: approve dip-buy below last price {last}",
-                ExpiresAt: expires), ct);
-
-            if (published is null)
-                log.LogInformation("{Asset}: vetoed, not published", asset);
-            else
-                log.LogInformation("{Asset}: opportunity {Id} published, max entry {Max}, expires {Expires:u}",
-                    asset, published.Id, published.MaxEntryPrice, published.ExpiresAt);
+            try
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(o.KrakenRequestDelayMs), clock, ct);
+                var fast = await kraken.GetCandlesAsync(asset, o.CandleIntervalMinutes, ct);
+                await Task.Delay(TimeSpan.FromMilliseconds(o.KrakenRequestDelayMs), clock, ct);
+                var hourly = await kraken.GetCandlesAsync(asset, 60, ct);
+                results.Add(Screener.Screen(asset, ticker, fast, hourly, o));
+            }
+            catch (Exception ex) when (ex is HttpRequestException or InvalidOperationException or TaskCanceledException && !ct.IsCancellationRequested)
+            {
+                log.LogWarning("{Asset}: screening failed: {Message}", asset, ex.Message);
+                results.Add(ScreenResult.Failed(asset, $"data error: {ex.Message}"));
+            }
         }
+
+        var ranked = Screener.Rank(results, o.MaxOpportunities);
+        var expires = clock.GetUtcNow().AddHours(o.OpportunityLifetimeHours);
+        var published = 0;
+
+        foreach (var r in ranked.Where(r => r.Approved))
+        {
+            var opp = await api.PublishOpportunityAsync(new CreateOpportunityDto(
+                r.Asset, Strategy, r.Metrics!.LastPrice, o.TakeProfitPct, o.StopLossPct, o.MaxSpendUsd,
+                r.Confidence, r.Reason, expires), ct);
+            if (opp is null)
+            {
+                log.LogInformation("{Asset}: approved but vetoed, not published", r.Asset);
+                continue;
+            }
+            published++;
+            log.LogInformation("{Asset}: APPROVED (confidence {Confidence:P0}) {Reason}", r.Asset, r.Confidence, r.Reason);
+        }
+
+        // An asset that no longer passes shouldn't keep a live opportunity from an earlier cycle.
+        var approved = ranked.Where(r => r.Approved).Select(r => r.Asset).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var stale in (await api.GetActiveOpportunitiesAsync(ct)).Where(x => x.Strategy == Strategy && !approved.Contains(x.Asset)))
+        {
+            await api.CancelOpportunityAsync(stale.Id, ct);
+            log.LogInformation("{Asset}: cancelled opportunity {Id}, no longer passes screening", stale.Asset, stale.Id);
+        }
+
+        foreach (var r in ranked.Where(r => !r.Approved))
+            log.LogInformation("{Asset}: rejected: {Reason}", r.Asset, r.Reason);
+
+        await api.PublishScreenAsync(new PublishScreenDto(
+            ranked.Select(r => new ScreenResultDto(r.Asset, r.Approved, r.Confidence, r.Reason, r.Metrics)).ToList()), ct);
+        log.LogInformation("Research cycle done: {Published} published, {Rejected} rejected", published, ranked.Count(r => !r.Approved));
     }
 }

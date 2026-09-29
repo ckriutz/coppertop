@@ -1,17 +1,18 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
   loadDashboard, requestFlatten, setEntriesPaused,
-  type Account, type AccountBalance, type Control, type Dashboard, type Mark, type Opportunity, type Order, type Position, type Stats, type TokenUsage, type Trade, type Veto,
+  type Account, type AccountBalance, type ScreenResult, type Control, type Dashboard, type Mark, type Opportunity, type Order, type Position, type Stats, type TokenUsage, type Trade, type Veto,
 } from './api'
 import { ago, money, num, pct, signClass, time, until } from './format'
 import { Table, type Column } from './Table'
 
 const REFRESH_MS = 10_000
 
-type Tab = 'positions' | 'opportunities' | 'orders' | 'trades' | 'history' | 'stats' | 'tokens' | 'account'
+type Tab = 'positions' | 'research' | 'opportunities' | 'orders' | 'trades' | 'history' | 'stats' | 'tokens' | 'account'
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'positions', label: 'Open positions' },
+  { id: 'research', label: 'Research' },
   { id: 'opportunities', label: 'Opportunities' },
   { id: 'orders', label: 'Orders' },
   { id: 'trades', label: 'Trades' },
@@ -124,6 +125,7 @@ export default function App() {
             {tab === 'positions' && (
               <Table rows={data.openPositions} columns={openPositionColumns(now, data.marks)} rowKey={(p) => p.id} empty="No open positions." />
             )}
+            {tab === 'research' && <ResearchPanel rows={data.screen} now={now} />}
             {tab === 'opportunities' && (
               <>
                 <Table rows={data.opportunities} columns={opportunityColumns(now)} rowKey={(o) => o.id} empty="No active opportunities. Research hasn't approved anything right now." />
@@ -151,6 +153,7 @@ export default function App() {
 function countFor(tab: Tab, d: Dashboard, closed: Position[]): number {
   switch (tab) {
     case 'positions': return d.openPositions.length
+    case 'research': return d.screen.filter((r) => r.approved).length
     case 'opportunities': return d.opportunities.length
     case 'orders': return d.orders.length
     case 'trades': return d.trades.length
@@ -449,3 +452,52 @@ function minutes(total: number): string {
   const m = Math.round(total)
   return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${m % 60}m`
 }
+
+function ResearchPanel({ rows, now }: { rows: ScreenResult[]; now: number }) {
+  if (rows.length === 0) return <p className="empty">Research hasn't screened anything yet.</p>
+  const at = rows[0].screenedAt
+  const hours = rows.find((r) => r.metrics?.sim)?.metrics?.sim?.hours
+  return (
+    <>
+      <p className="muted">
+        Screened {ago(at, now)}. Each asset is checked for spread, volume, crash and trend, then the Trader's dip strategy is
+        replayed on the last {hours ? `${hours.toFixed(0)}h` : ''} of 5-minute candles after fees. Only assets whose replay made money
+        are approved. Confidence is the win rate we can be 95% sure of.
+      </p>
+      <Table rows={rows} columns={screenColumns} rowKey={(r) => r.asset} empty="" />
+    </>
+  )
+}
+
+const pctCell = (v: number | null | undefined, digits = 1) =>
+  v == null ? '—' : <span className={signClass(v)}>{v > 0 ? '+' : ''}{v.toFixed(digits)}%</span>
+
+const screenColumns: Column<ScreenResult>[] = [
+  { header: 'Verdict', cell: (r) => (r.approved ? <span className="badge ok small">approved</span> : <span className="badge no small">rejected</span>) },
+  { header: 'Asset', cell: (r) => <strong>{r.asset}</strong> },
+  { header: 'Confidence', cell: (r) => pct(r.confidence * 100, 0), align: 'right' },
+  {
+    header: 'Replay W/L',
+    cell: (r) => {
+      const s = r.metrics?.sim
+      if (!s) return '—'
+      return (
+        <span title={`${s.trades} trades (${s.open} still open) over ${s.hours.toFixed(0)}h; break-even needs ${s.breakevenWinRatePct.toFixed(0)}% wins`}>
+          {s.wins}/{s.losses} {s.winRatePct == null ? '' : <span className="muted">({s.winRatePct.toFixed(0)}% vs {s.breakevenWinRatePct.toFixed(0)}%)</span>}
+        </span>
+      )
+    },
+    align: 'right',
+  },
+  { header: 'Avg net', cell: (r) => (r.metrics?.sim && r.metrics.sim.wins + r.metrics.sim.losses > 0 ? pctCell(r.metrics.sim.avgNetPct, 2) : '—'), align: 'right' },
+  { header: 'Avg hold', cell: (r) => (r.metrics?.sim?.avgHoldMinutes ? minutes(r.metrics.sim.avgHoldMinutes) : '—'), align: 'right' },
+  { header: 'Spread', cell: (r) => (r.metrics ? pct(r.metrics.spreadPct, 3) : '—'), align: 'right' },
+  { header: '24h vol', cell: (r) => (r.metrics ? compactUsd(r.metrics.volume24hUsd) : '—'), align: 'right' },
+  { header: '24h', cell: (r) => pctCell(r.metrics?.change24hPct), align: 'right' },
+  { header: '7d', cell: (r) => pctCell(r.metrics?.change7dPct), align: 'right' },
+  { header: 'RSI', cell: (r) => (r.metrics?.rsi14 == null ? '—' : r.metrics.rsi14.toFixed(0)), align: 'right' },
+  { header: 'Trend', cell: (r) => <span className={r.metrics?.trend === 'down' ? 'neg' : r.metrics?.trend === 'up' ? 'pos' : ''}>{r.metrics?.trend ?? '—'}</span> },
+  { header: 'Why', cell: (r) => <span className="reason" title={r.reason}>{r.approved ? r.reason : r.reason.split(' | ')[0]}</span> },
+]
+
+const compactUsd = (v: number) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', notation: 'compact', maximumFractionDigits: 1 }).format(v)

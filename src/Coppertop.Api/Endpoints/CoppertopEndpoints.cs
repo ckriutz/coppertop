@@ -19,6 +19,49 @@ public static class CoppertopEndpoints
         MapStats(app);
         MapControl(app);
         MapAccount(app);
+        MapResearch(app);
+    }
+
+    private static void MapResearch(WebApplication app)
+    {
+        var group = app.MapGroup("/research");
+
+        group.MapGet("/screen", (Database db) =>
+        {
+            using var c = db.Open();
+            var rows = c.Query<ScreenRow>("SELECT * FROM research_screen ORDER BY approved DESC, confidence DESC, asset");
+            return Results.Ok(rows.Select(r => new ScreenResult(
+                r.Asset, r.Approved, r.Confidence, r.Reason,
+                r.Metrics is null ? null : System.Text.Json.JsonDocument.Parse(r.Metrics).RootElement.Clone(),
+                r.ScreenedAt)));
+        });
+
+        // Research posts every watchlist verdict each cycle; the previous set is replaced.
+        group.MapPost("/screen", (Database db, TimeProvider clock, PublishScreenRequest req) =>
+        {
+            var errors = Validation.Screen(req);
+            if (errors.Count > 0) return Results.ValidationProblem(errors);
+
+            var now = Database.Ts(clock.GetUtcNow());
+            using var c = db.Open();
+            using var tx = c.BeginTransaction();
+            c.Execute("DELETE FROM research_screen", transaction: tx);
+            foreach (var r in req.Results)
+            {
+                c.Execute("""
+                    INSERT INTO research_screen (asset, approved, confidence, reason, metrics, screened_at)
+                    VALUES (@asset, @Approved, @Confidence, @Reason, @metrics, @now)
+                    """,
+                    new
+                    {
+                        asset = Normalize(r.Asset), r.Approved, r.Confidence, r.Reason,
+                        metrics = r.Metrics is { ValueKind: not System.Text.Json.JsonValueKind.Null } m ? m.GetRawText() : null,
+                        now
+                    }, tx);
+            }
+            tx.Commit();
+            return Results.NoContent();
+        });
     }
 
     private static void MapAccount(WebApplication app)

@@ -6,7 +6,7 @@ Automated Kraken crypto trader. Three fully isolated backend services plus a web
 |---|---|---|---|
 | **Api** | `src/Coppertop.Api` | The only service that writes to SQLite: opportunities, vetoes, positions, orders, trades, token usage and the summary. | No |
 | **Trader** | `src/Coppertop.Trader` | Runs a plain C# loop every 30s: reads opportunities, checks prices, enters positions and manages exits. | No |
-| **Research** | `src/Coppertop.Research` | Publishes opportunities (what to buy and within which limits). Currently a **stub**. | Later |
+| **Research** | `src/Coppertop.Research` | Screens the watchlist each hour (plain code, no LLM yet) and publishes opportunities (what to buy and within which limits). | Later |
 | **Web** | `src/Coppertop.Web` | React dashboard: summary, live unrealized P&L, open positions, opportunities, orders, trades, closed positions, stats and token usage, plus the kill switch. Refreshes every 10s. | No |
 
 ## How Research tells the Trader what to buy
@@ -33,7 +33,7 @@ Each service has its own `Dockerfile` in its folder and can be built on its own,
 Each service has its own workflow in `.github/workflows/` (`api.yml`, `trader.yml`, `research.yml`, `web.yml`).
 - A workflow runs on a push to `main` that touches that service's folder, or when started manually.
 - It builds `linux/amd64` and `linux/arm64` images and pushes them to `ghcr.io/<owner>/coppertop-<service>`, tagged `latest` and with that workflow's `github.run_number`.
-- The Api and Trader workflows run their unit tests first.
+- The Api, Trader and Research workflows run their unit tests first.
 
 On the Pi:
 ```bash
@@ -45,11 +45,12 @@ New GHCR packages are private by default. Either run `docker login ghcr.io` on t
 ## Run locally
 ```bash
 cd src/Coppertop.Api      && dotnet run   # http://localhost:5057
-cd src/Coppertop.Research && dotnet run   # publishes stub opportunities, then repeats hourly (retries after 1 min on failure)
+cd src/Coppertop.Research && dotnet run   # screens the watchlist, publishes approved coins, then repeats hourly (retries after 1 min on failure)
 cd src/Coppertop.Trader   && dotnet run   # paper-trades every 30s
 cd src/Coppertop.Web      && npm install && npm run dev   # http://localhost:5173, forwards /api to :5057
 dotnet test src/Coppertop.Api.Tests
 dotnet test src/Coppertop.Trader.Tests
+dotnet test src/Coppertop.Research.Tests
 ```
 In dev, set `COPPERTOP_API_URL` and `COPPERTOP_API_KEY` (env vars or `src/Coppertop.Web/.env.local`) if the Api isn't on :5057 or has a key.
 Quick checks: `curl localhost:5057/summary`, `curl "localhost:5057/positions?status=open"`.
@@ -75,6 +76,16 @@ When Kraken credentials are set, the Trader's `AccountWorker` reads the real acc
 - The dashboard shows an account strip (total value, USD cash available, sync time) and a **Kraken account** tab.
 - These are real balances and are separate from the paper P&L. Paper trading doesn't touch them.
 
+## Research screener
+Each cycle, Research screens every watchlist coin using Kraken public data only (tickers, 5m and 1h candles, 1.1s between calls to respect the rate limit it shares with the Trader). No tokens are spent.
+- **Hard rules** (all reasons are listed): spread > `MaxSpreadPct` (0.30%), 24h volume < `MinVolume24hUsd` ($1M), 24h drop > `MaxDrop24hPct` (8%), 1h downtrend (SMA50 < SMA200, if `RejectDowntrend`).
+- **Dip replay**: it replays the Trader's dip strategy over the last ~60h of 5m candles (entry below SMA20 − 1.5σ, TP/SL from Research's own options, maker fee on TP, taker fee + slippage on SL; if a candle hits both, the stop wins). A coin needs at least `MinSimTrades` (3) resolved trades and an average net > `MinSimAvgNetPct` (0%).
+- **Confidence** is the 95% Wilson lower bound of the replay win rate. Only the top `MaxOpportunities` (5) by average net are published, as `dip` opportunities that expire after 4h.
+- Coins that stop passing have their active `dip` opportunity cancelled.
+- All results (approved and rejected, with metrics and reasons) go to `POST /research/screen` and show on the dashboard **Research** tab (`GET /research/screen`).
+- The replay settings (`CandleIntervalMinutes`, `SmaPeriod`, `BandStdDevs`, TP/SL, fees, slippage) must be kept in step with the Trader's, or the replay stops describing what the Trader does.
+- With TP +1.5% / SL −2%, a win nets about +0.99% and a loss about −2.73% after fees, so the strategy needs about a **73% win rate** to break even. On the first live run, no coin reached that, so nothing was approved. That is the screener doing its job.
+
 ## Paper fill model
 Paper fills are deliberately pessimistic, so paper P&L shouldn't flatter the strategy:
 - **Entries rest.** A buy is recorded as an `open` order at the bid; no position exists yet. It fills (at the limit) only when a Kraken public trade prints *strictly below* the limit after placement, or the ask drops below it. A print exactly at our price doesn't count, because we don't know our place in the queue.
@@ -88,7 +99,8 @@ Paper fills are deliberately pessimistic, so paper P&L shouldn't flatter the str
 - Setting `Api:Key` on the Api, and `CoppertopApi:ApiKey` on the other two services, turns on the `X-Api-Key` header check.
 
 ## Known limitations / next steps
-- Research is a stub: it approves every watchlist asset below its last price. Next: TypeSafe AI for the decision logic, Sonar for news vetoes, and token usage recorded through `POST /token-usage`.
+- Research is rule-based only. Next: TypeSafe AI to judge the screener's shortlist, Sonar (via OpenRouter) for news vetoes, and token usage recorded through `POST /token-usage`.
+- The dip TP/SL ratio needs about 73% wins to break even; consider a more symmetric TP/SL.
 - Live mode: Kraken supports only one conditional close order per entry, so the take-profit sits on Kraken and the Trader must watch the stop-loss itself.
 - Unrealized P&L uses prices from the Trader's last cycle, so it only updates while the Trader is running.
 - Prices are polled over REST. Switch to WebSocket if polling is too slow.

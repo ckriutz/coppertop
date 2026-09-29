@@ -90,3 +90,6 @@ button.danger:hover:not(:disabled) { background: #3a1416; border-color: var(--ne
 .account-strip:hover { border-color: var(--muted); }
 .account-strip .account-title { font-weight: 600; }
 button.link { background: none; border: none; padding: 0; color: inherit; text-decoration: underline; cursor: pointer; font: inherit; }
+.badge.ok { background: rgba(46, 160, 67, 0.2); color: var(--pos, #3fb950); }
+.badge.no { background: rgba(248, 81, 73, 0.15); color: var(--neg, #f85149); }
+td .reason { display: inline-block; max-width: 420px; white-space: normal; font-size: 12px; }

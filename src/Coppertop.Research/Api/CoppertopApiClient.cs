@@ -18,6 +18,10 @@ public sealed record CreateOpportunityDto(
 
 public sealed record OpportunityDto(long Id, string Asset, string Strategy, decimal MaxEntryPrice, DateTimeOffset ExpiresAt);
 
+public sealed record ScreenResultDto(string Asset, bool Approved, decimal Confidence, string Reason, object? Metrics);
+
+public sealed record PublishScreenDto(IReadOnlyList<ScreenResultDto> Results);
+
 public sealed record CreateVetoDto(string Asset, string Reason, DateTimeOffset ExpiresAt);
 
 public sealed record CreateTokenUsageDto(string Service, string Model, string Purpose, long InputTokens, long OutputTokens, decimal CostUsd);
@@ -41,6 +45,22 @@ public sealed class CoppertopApiClient
         if (res.StatusCode == HttpStatusCode.Conflict) return null;
         await EnsureSuccessAsync(res, ct);
         return await res.Content.ReadFromJsonAsync<OpportunityDto>(ct);
+    }
+
+    public async Task<IReadOnlyList<OpportunityDto>> GetActiveOpportunitiesAsync(CancellationToken ct) =>
+        await _http.GetFromJsonAsync<List<OpportunityDto>>("/opportunities?active=true", ct) ?? [];
+
+    public async Task CancelOpportunityAsync(long id, CancellationToken ct)
+    {
+        using var res = await _http.PostAsync($"/opportunities/{id}/cancel", null, ct);
+        if (res.StatusCode == HttpStatusCode.Conflict) return; // already consumed/expired
+        await EnsureSuccessAsync(res, ct);
+    }
+
+    public async Task PublishScreenAsync(PublishScreenDto dto, CancellationToken ct)
+    {
+        using var res = await _http.PostAsJsonAsync("/research/screen", dto, ct);
+        await EnsureSuccessAsync(res, ct);
     }
 
     public async Task PublishVetoAsync(CreateVetoDto dto, CancellationToken ct)

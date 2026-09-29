@@ -162,6 +162,40 @@ export interface Account {
   balances: AccountBalance[]
 }
 
+export interface SimMetrics {
+  trades: number
+  wins: number
+  losses: number
+  open: number
+  winRatePct: number | null
+  breakevenWinRatePct: number
+  avgNetPct: number
+  avgHoldMinutes: number
+  hours: number
+}
+
+export interface ScreenMetrics {
+  lastPrice: number
+  spreadPct: number
+  volume24hUsd: number
+  change24hPct: number | null
+  change7dPct: number | null
+  rsi14: number | null
+  atrPct: number | null
+  trend: string
+  sim: SimMetrics | null
+}
+
+/** Research's latest verdict for one watchlist asset. */
+export interface ScreenResult {
+  asset: string
+  approved: boolean
+  confidence: number
+  reason: string
+  metrics: ScreenMetrics | null
+  screenedAt: string
+}
+
 export interface Dashboard {
   summary: Summary
   openPositions: Position[]
@@ -175,6 +209,7 @@ export interface Dashboard {
   control: Control
   stats: Stats
   account: Account
+  screen: ScreenResult[]
 }
 
 async function get<T>(path: string, signal?: AbortSignal): Promise<T> {
@@ -198,7 +233,7 @@ export const setEntriesPaused = (entriesPaused: boolean) => send<Control>('PUT',
 export const requestFlatten = () => send<Control>('POST', '/control/flatten')
 
 export async function loadDashboard(signal?: AbortSignal): Promise<Dashboard> {
-  const [summary, openPositions, positions, orders, trades, opportunities, vetoes, tokenUsage, marks, control, stats, account] = await Promise.all([
+  const [summary, openPositions, positions, orders, trades, opportunities, vetoes, tokenUsage, marks, control, stats, account, screen] = await Promise.all([
     get<Summary>('/summary', signal),
     get<Position[]>('/positions?status=open', signal),
     get<Position[]>('/positions', signal),
@@ -211,10 +246,11 @@ export async function loadDashboard(signal?: AbortSignal): Promise<Dashboard> {
     get<Control>('/control', signal),
     get<Stats>('/stats', signal),
     get<Account>('/account', signal),
+    get<ScreenResult[]>('/research/screen', signal),
   ])
   return {
     summary, openPositions, positions, orders, trades, opportunities, vetoes, tokenUsage,
     marks: Object.fromEntries(marks.map((m) => [m.asset, m])),
-    control, stats, account,
+    control, stats, account, screen,
   }
 }
