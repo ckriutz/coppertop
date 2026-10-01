@@ -6,7 +6,7 @@ Automated Kraken crypto trader. Three fully isolated backend services plus a web
 |---|---|---|---|
 | **Api** | `src/Coppertop.Api` | The only service that writes to SQLite: opportunities, vetoes, positions, orders, trades, token usage and the summary. | No |
 | **Trader** | `src/Coppertop.Trader` | Runs a plain C# loop every 30s: reads opportunities, checks prices, enters positions and manages exits. | No |
-| **Research** | `src/Coppertop.Research` | Screens the watchlist each hour (plain code, no LLM yet) and publishes opportunities (what to buy and within which limits). | Later |
+| **Research** | `src/Coppertop.Research` | Screens the watchlist each hour (plain code), checks the survivors for bad news with Sonar, and publishes opportunities (what to buy and within which limits). | Yes, Sonar news checks (budgeted) |
 | **Web** | `src/Coppertop.Web` | React dashboard: summary, live unrealized P&L, open positions, opportunities, orders, trades, closed positions, stats and token usage, plus the kill switch. Refreshes every 10s. | No |
 
 ## How Research tells the Trader what to buy
@@ -25,6 +25,7 @@ docker compose up --build        # or: podman compose up --build
 
 Optional secrets go in `./.env` (git-ignored) or the shell:
 - `COPPERTOP_API_KEY` turns on the key check between services. nginx adds the key to requests on the server side, so the browser never sees it.
+- `OPENROUTER_API_KEY` turns on Research's Sonar news vetoes. Without it, screened coins are published unchecked.
 - `KRAKEN_API_KEY` and `KRAKEN_API_SECRET` (the Kraken key and its private key) turn on Kraken's `validate=true` order checks and the read-only Kraken account balances on the dashboard. The key needs "Query Funds" and "Create & Modify Orders"; never give it "Withdraw Funds". The names must be exactly these; compose won't pick up other names such as `API_KEY` / `PRIVATE_KEY`.
 
 Each service has its own `Dockerfile` in its folder and can be built on its own, e.g. `docker build src/Coppertop.Trader`. The Dockerfiles cross-compile for the target architecture (`--platform=$BUILDPLATFORM` + `dotnet publish -a $TARGETARCH`), so building arm64 images on an x64 machine is fast.
@@ -86,6 +87,15 @@ Each cycle, Research screens every watchlist coin using Kraken public data only 
 - The replay settings (`CandleIntervalMinutes`, `SmaPeriod`, `BandStdDevs`, TP/SL, fees, slippage) must be kept in step with the Trader's, or the replay stops describing what the Trader does.
 - With TP +1.5% / SL −2%, a win nets about +0.99% and a loss about −2.73% after fees, so the strategy needs about a **73% win rate** to break even. On the first live run, no coin reached that, so nothing was approved. That is the screener doing its job.
 
+## News vetoes (Sonar)
+After screening, Research asks Perplexity Sonar (`perplexity/sonar` through OpenRouter, `OpenRouter:ApiKey`) about each coin that passed, and only those, so a normal cycle makes 0–5 calls.
+- The question: is there a specific, recent (`NewsLookbackHours`, 48h) negative event about **this coin itself**? That means a hack of its own network or token, its delisting or a trading halt, regulatory action aimed at it, a chain halt, a big unlock or dump, a depeg, or a project collapse. Hacks at other exchanges, market moves and opinion pieces don't count, and when unsure it allows. It replies with JSON `{"verdict":"allow|block","reason":"..."}`.
+- **Block**: Research posts a veto (`NewsVetoHours`, 12h), which cancels the coin's opportunities and blocks new ones. The Research tab shows "news veto: …".
+- **Allow**: the opportunity is published with the news summary appended to its reason.
+- **Couldn't check** (error, unparseable reply or budget used up): the coin is held back this cycle, unless `PublishWhenNewsUnavailable` is true.
+- Coins already vetoed are skipped without a call. A verdict is reused for `NewsCacheHours` (6h), so the same coin is checked at most about 4 times a day.
+- **Cost**: about $0.005 per call, almost all of it Perplexity's search fee. Every call is recorded through `POST /token-usage` (service `research`, purpose `news-check <ASSET>`) with the cost OpenRouter reports, and shows in the dashboard's token usage. Calls stop for the rest of the UTC day once that day's research spend reaches `NewsDailyBudgetUsd` ($0.25, about 48 calls).
+
 ## Paper fill model
 Paper fills are deliberately pessimistic, so paper P&L shouldn't flatter the strategy:
 - **Entries rest.** A buy is recorded as an `open` order at the bid; no position exists yet. It fills (at the limit) only when a Kraken public trade prints *strictly below* the limit after placement, or the ask drops below it. A print exactly at our price doesn't count, because we don't know our place in the queue.
@@ -99,7 +109,7 @@ Paper fills are deliberately pessimistic, so paper P&L shouldn't flatter the str
 - Setting `Api:Key` on the Api, and `CoppertopApi:ApiKey` on the other two services, turns on the `X-Api-Key` header check.
 
 ## Known limitations / next steps
-- Research is rule-based only. Next: TypeSafe AI to judge the screener's shortlist, Sonar (via OpenRouter) for news vetoes, and token usage recorded through `POST /token-usage`.
+- Research approves coins with plain-code rules and uses Sonar only to veto on news. Next: per-coin memory, so past results and news inform the next run.
 - The dip TP/SL ratio needs about 73% wins to break even; consider a more symmetric TP/SL.
 - Live mode: Kraken supports only one conditional close order per entry, so the take-profit sits on Kraken and the Trader must watch the stop-loss itself.
 - Unrealized P&L uses prices from the Trader's last cycle, so it only updates while the Trader is running.

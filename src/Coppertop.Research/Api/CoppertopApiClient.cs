@@ -24,6 +24,10 @@ public sealed record PublishScreenDto(IReadOnlyList<ScreenResultDto> Results);
 
 public sealed record CreateVetoDto(string Asset, string Reason, DateTimeOffset ExpiresAt);
 
+public sealed record VetoDto(long Id, string Asset, string Reason, DateTimeOffset ExpiresAt);
+
+public sealed record TokenUsageDto(long Id, string Service, decimal CostUsd, DateTimeOffset CreatedAt);
+
 public sealed record CreateTokenUsageDto(string Service, string Model, string Purpose, long InputTokens, long OutputTokens, decimal CostUsd);
 
 public sealed class CoppertopApiClient
@@ -68,6 +72,13 @@ public sealed class CoppertopApiClient
         using var res = await _http.PostAsJsonAsync("/vetoes", dto, ct);
         await EnsureSuccessAsync(res, ct);
     }
+
+    public async Task<IReadOnlyList<VetoDto>> GetActiveVetoesAsync(CancellationToken ct) =>
+        await _http.GetFromJsonAsync<List<VetoDto>>("/vetoes?active=true", ct) ?? [];
+
+    // The Api returns the latest 500 rows, which covers a day of news checks many times over.
+    public async Task<IReadOnlyList<TokenUsageDto>> GetTokenUsageAsync(CancellationToken ct) =>
+        await _http.GetFromJsonAsync<List<TokenUsageDto>>("/token-usage", ct) ?? [];
 
     public async Task RecordTokenUsageAsync(CreateTokenUsageDto dto, CancellationToken ct)
     {

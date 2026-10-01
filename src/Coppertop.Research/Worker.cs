@@ -1,26 +1,35 @@
 using Coppertop.Research.Api;
 using Coppertop.Research.Kraken;
+using Coppertop.Research.News;
 using Coppertop.Research.Screening;
 using Microsoft.Extensions.Options;
 
 namespace Coppertop.Research;
 
 /// <summary>
-/// Research cycle, step 1 (no LLM): screen the watchlist with plain code, publish opportunities for the best few,
-/// cancel opportunities for assets that no longer pass, and post every verdict to the Api for the dashboard.
+/// Research cycle: screen the watchlist with plain code (free), ask Sonar about recent bad news for the few coins
+/// that pass (paid, budgeted), publish opportunities for the survivors, veto coins with bad news, cancel
+/// opportunities for assets that no longer pass, and post every verdict to the Api for the dashboard.
 /// </summary>
 public sealed class Worker(
     IServiceScopeFactory scopes,
     IOptions<ResearchOptions> options,
+    NewsGate news,
     TimeProvider clock,
     ILogger<Worker> log) : BackgroundService
 {
     private const string Strategy = "dip";
+    private const string Service = "research";
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var o = options.Value;
         log.LogInformation("Research starting: screening {Count} assets every {Minutes} min", o.Watchlist.Count, o.CycleMinutes);
+        using (var scope = scopes.CreateScope())
+        {
+            if (!scope.ServiceProvider.GetRequiredService<SonarClient>().Enabled)
+                log.LogWarning("OpenRouter:ApiKey is not set; news vetoes are off and screened coins are published unchecked.");
+        }
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -31,6 +40,7 @@ public sealed class Worker(
                 await ResearchCycleAsync(
                     scope.ServiceProvider.GetRequiredService<KrakenPublicClient>(),
                     scope.ServiceProvider.GetRequiredService<CoppertopApiClient>(),
+                    scope.ServiceProvider.GetRequiredService<SonarClient>(),
                     o, stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -49,7 +59,7 @@ public sealed class Worker(
         }
     }
 
-    private async Task ResearchCycleAsync(KrakenPublicClient kraken, CoppertopApiClient api, ResearchOptions o, CancellationToken ct)
+    private async Task ResearchCycleAsync(KrakenPublicClient kraken, CoppertopApiClient api, SonarClient sonar, ResearchOptions o, CancellationToken ct)
     {
         if (o.Watchlist.Count == 0)
         {
@@ -81,7 +91,8 @@ public sealed class Worker(
             }
         }
 
-        var ranked = Screener.Rank(results, o.MaxOpportunities);
+        var ranked = Screener.Rank(results, o.MaxOpportunities).ToList();
+        await ApplyNewsAsync(ranked, api, sonar, o, ct);
         var expires = clock.GetUtcNow().AddHours(o.OpportunityLifetimeHours);
         var published = 0;
 
@@ -113,5 +124,64 @@ public sealed class Worker(
         await api.PublishScreenAsync(new PublishScreenDto(
             ranked.Select(r => new ScreenResultDto(r.Asset, r.Approved, r.Confidence, r.Reason, r.Metrics)).ToList()), ct);
         log.LogInformation("Research cycle done: {Published} published, {Rejected} rejected", published, ranked.Count(r => !r.Approved));
+    }
+
+    /// <summary>
+    /// Checks each approved coin for recent bad news. Bad news vetoes the coin (which also cancels its opportunities)
+    /// and rejects it; a coin that couldn't be checked is held back unless PublishWhenNewsUnavailable is set.
+    /// </summary>
+    private async Task ApplyNewsAsync(List<ScreenResult> ranked, CoppertopApiClient api, SonarClient sonar, ResearchOptions o, CancellationToken ct)
+    {
+        if (!ranked.Any(r => r.Approved)) return;
+
+        var vetoes = (await api.GetActiveVetoesAsync(ct)).GroupBy(v => v.Asset, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+        var dayStart = new DateTimeOffset(clock.GetUtcNow().UtcDateTime.Date, TimeSpan.Zero);
+        var spent = sonar.Enabled
+            ? (await api.GetTokenUsageAsync(ct)).Where(t => t.Service == Service && t.CreatedAt >= dayStart).Sum(t => t.CostUsd)
+            : 0m;
+        var estimate = sonar.EstimatedCallCostUsd;
+
+        for (var i = 0; i < ranked.Count; i++)
+        {
+            var r = ranked[i];
+            if (!r.Approved) continue;
+
+            if (vetoes.TryGetValue(r.Asset, out var veto))
+            {
+                ranked[i] = r with { Approved = false, Reason = $"vetoed until {veto.ExpiresAt:MM-dd HH:mm}Z: {veto.Reason} | {r.Reason}" };
+                continue;
+            }
+
+            var outcome = await news.CheckAsync(r.Asset, sonar.Enabled, spent, o, estimate,
+                (asset, token) => sonar.CheckNewsAsync(asset, o.NewsLookbackHours, token), ct);
+
+            if (outcome.Fresh is { } fresh)
+            {
+                spent += fresh.CostUsd;
+                await api.RecordTokenUsageAsync(new CreateTokenUsageDto(Service, fresh.Model, $"news-check {r.Asset}",
+                    fresh.InputTokens, fresh.OutputTokens, fresh.CostUsd), ct);
+                log.LogInformation("{Asset}: Sonar says {Verdict} (${Cost:0.0000}): {Reason} {Sources}", r.Asset,
+                    fresh.Verdict.Block ? "BLOCK" : "allow", fresh.CostUsd, fresh.Verdict.Reason, string.Join(" ", fresh.Sources));
+            }
+
+            switch (outcome.Status)
+            {
+                case NewsStatus.Blocked:
+                    await api.PublishVetoAsync(new CreateVetoDto(r.Asset, $"news: {outcome.Reason}",
+                        clock.GetUtcNow().AddHours(o.NewsVetoHours)), ct);
+                    ranked[i] = r with { Approved = false, Reason = $"news veto: {outcome.Reason} | {r.Reason}" };
+                    log.LogWarning("{Asset}: vetoed for {Hours}h on news: {Reason}", r.Asset, o.NewsVetoHours, outcome.Reason);
+                    break;
+                case NewsStatus.Unavailable when !o.PublishWhenNewsUnavailable:
+                    ranked[i] = r with { Approved = false, Reason = $"{outcome.Reason}; held back | {r.Reason}" };
+                    log.LogWarning("{Asset}: {Reason}; not publishing", r.Asset, outcome.Reason);
+                    break;
+                case NewsStatus.Unavailable:
+                case NewsStatus.Clear:
+                    ranked[i] = r with { Reason = $"{r.Reason} | news: {outcome.Reason}" };
+                    break;
+            }
+        }
     }
 }

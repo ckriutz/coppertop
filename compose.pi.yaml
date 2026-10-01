@@ -30,6 +30,7 @@ services:
     environment:
       CoppertopApi__BaseUrl: http://api:8080
       CoppertopApi__ApiKey: ${COPPERTOP_API_KEY:-}
+      OpenRouter__ApiKey: ${OPENROUTER_API_KEY:-}
     restart: unless-stopped
 
   web:

@@ -1,5 +1,5 @@
 ## GOAL
-Create an automated system to trade Crypto on Kraken in C# that will use an combo of traditional LLM's and TypeSafe AI to make the decisions. The system should be able to analyze past market data and make informed trading decisions based on that analysis. It should be able to look at past research and use that as a guide about what to do, and learn from the experience.
+Create an automated system to trade Crypto on Kraken in C# that uses plain-code math for the trading decisions and a low-cost LLM only where language is needed (news, summaries). The system should be able to analyze past market data and make informed trading decisions based on that analysis. It should be able to look at past research and use that as a guide about what to do, and learn from the experience.
 
 Trades should be done automatically, and with the goal of making money consistently while managing risk effectively.
 
@@ -17,7 +17,7 @@ UPDATED: Three isolated backend services (Api, Trader, Research) + the FrontEnd.
 - Keeping track of trades, outstanding orders, and portfolio performance has been challenging.
 
 ## Current Plan
-- Use Typesafe AI (https://docs.typesafe.ai) to provide the majority of the decision-making logic for the trading system.
+- UPDATED: TypeSafe AI removed from the plan. The rule-based screener (Research) makes the numeric decisions for free.
 - Use Sonar from Perplexity to get market news.
 - Use the Kraken API to execute trades and retrieve market data.
 - Create Skills for the traditional LLM to handle tasks that are better suited for it, such as natural language understanding and complex reasoning.
@@ -28,25 +28,24 @@ UPDATED: Three isolated backend services (Api, Trader, Research) + the FrontEnd.
 
 ### Anticipated Flow for buying Crypto
 1) Retrieve the latest market data from the Kraken API.
-2) Analyze the market data using TypeSafe AI to identify potential trading opportunities.
+2) Screen the market data with plain-code rules and a strategy replay to identify potential trading opportunities.
 3) Use the traditional LLM to interpret market news and complex reasoning tasks.
-4) Make trading decisions based on the combined analysis from TypeSafe AI and the traditional LLM. NOTE: It's very possible that no buy order is reccomended.
+4) Make trading decisions based on the screener, with the traditional LLM able to veto on news. NOTE: It's very possible that no buy order is reccomended.
 5) Execute trades through the Kraken API.
 6) Update the memory file in blob storage with the latest trade and market information.
 7) Update the FrontEnd with the current portfolio holdings, outstanding orders, recent trades, and overall performance metrics.
 
 ### Anticipated Flow for selling Crypto
 1) Retrieve the latest market data from the Kraken API.
-2) Analyze the market data using TypeSafe AI to identify potential selling opportunities.
+2) Check prices against the take-profit and stop-loss in plain code (the Trader).
 3) Use the traditional LLM to interpret market news and complex reasoning tasks.
-4) Make selling decisions based on the combined analysis from TypeSafe AI and the traditional LLM. NOTE: It's very possible that no sell order is recommended.
+4) Make selling decisions in plain code; news from the traditional LLM can trigger an early exit. NOTE: It's very possible that no sell order is recommended.
 5) Execute sell orders through the Kraken API.
 6) Update the memory file in blob storage with the latest trade and market information.
 7) Update the FrontEnd with the current portfolio holdings, outstanding orders, recent trades, and overall performance metrics.
 
 ### Outstanding Questions
-- How do we get information into TypeSafeAI for it to analyze and make trading decisions?
-- What part of the process needs a traditional LLM, and which needs TypeSafe?
+- What part of the process needs a traditional LLM? UPDATED: news vetoes (Sonar), and later summaries/memory. Numeric decisions stay in code.
 - How often do we run the process to check for prices, and make trades? More frequent use may lead to better responsiveness to market changes but could increase LLM costs.
 - Where do we store data? Can we use SQLite?
 - Rather than deal with making API calls, can we just use the API instead? Along with MCP? https://docs.kraken.com/home/cli - UPDATED: NO. This is not the plan, use the API as much as we can.

@@ -31,6 +31,27 @@ public sealed class ResearchOptions
 
     // Pause between Kraken public calls (Kraken allows roughly one per second per IP, shared with the Trader).
     public int KrakenRequestDelayMs { get; set; } = 1100;
+
+    // News vetoes (Sonar via OpenRouter). Only coins that pass the screener are checked.
+    public int NewsLookbackHours { get; set; } = 48;
+    public int NewsCacheHours { get; set; } = 6;
+    public int NewsVetoHours { get; set; } = 12;
+    public decimal NewsDailyBudgetUsd { get; set; } = 0.25m;
+    public bool PublishWhenNewsUnavailable { get; set; } = false;
+}
+
+public sealed class OpenRouterOptions
+{
+    public const string Section = "OpenRouter";
+
+    public string BaseUrl { get; set; } = "https://openrouter.ai/api/v1";
+    public string ApiKey { get; set; } = "";
+    public string NewsModel { get; set; } = "perplexity/sonar";
+
+    // Used only when OpenRouter doesn't report the cost itself, and for the budget check before a call.
+    public decimal InputUsdPerMillion { get; set; } = 1m;
+    public decimal OutputUsdPerMillion { get; set; } = 1m;
+    public decimal SearchUsdPerRequest { get; set; } = 0.005m;
 }
 
 public sealed class CoppertopApiOptions
