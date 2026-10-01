@@ -15,7 +15,8 @@ public sealed record OpportunityDto(
     decimal MaxSpendUsd,
     decimal Confidence,
     string Reason,
-    DateTimeOffset ExpiresAt);
+    DateTimeOffset ExpiresAt,
+    DateTimeOffset? CreatedAt = null);
 
 public sealed record PositionDto(
     long Id,
@@ -55,7 +56,8 @@ public sealed record CreateOrderDto(
     string Status,
     string? KrakenTxId,
     bool IsSimulated,
-    string? Note);
+    string? Note,
+    object? Context = null);
 
 public sealed record OrderDto(
     long Id,

@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
   loadDashboard, requestFlatten, setEntriesPaused,
-  type Account, type AccountBalance, type ScreenResult, type Control, type Dashboard, type Mark, type Opportunity, type Order, type Position, type Stats, type TokenUsage, type Trade, type Veto,
+  type Account, type AccountBalance, type EntryAnalysis, type ScreenResult, type Control, type Dashboard, type Mark, type Opportunity, type Order, type Position, type Stats, type TokenUsage, type Trade, type Veto,
 } from './api'
 import { ago, money, num, pct, signClass, time, until } from './format'
 import { Table, type Column } from './Table'
 
 const REFRESH_MS = 10_000
 
-type Tab = 'positions' | 'research' | 'opportunities' | 'orders' | 'trades' | 'history' | 'stats' | 'tokens' | 'account'
+type Tab = 'positions' | 'research' | 'opportunities' | 'orders' | 'trades' | 'history' | 'stats' | 'learning' | 'tokens' | 'account'
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'positions', label: 'Open positions' },
@@ -18,6 +18,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: 'trades', label: 'Trades' },
   { id: 'history', label: 'Closed positions' },
   { id: 'stats', label: 'Stats' },
+  { id: 'learning', label: 'Predicted vs actual' },
   { id: 'tokens', label: 'Token usage' },
   { id: 'account', label: 'Kraken account' },
 ]
@@ -141,6 +142,7 @@ export default function App() {
             {tab === 'trades' && <Table rows={data.trades} columns={tradeColumns} rowKey={(t) => t.id} empty="No trades yet." />}
             {tab === 'history' && <Table rows={closed} columns={closedColumns} rowKey={(p) => p.id} empty="No closed positions yet." />}
             {tab === 'stats' && <StatsPanel stats={data.stats} />}
+            {tab === 'learning' && <LearningPanel rows={data.entries} />}
             {tab === 'tokens' && <Table rows={data.tokenUsage} columns={tokenColumns} rowKey={(t) => t.id} empty="No LLM calls recorded yet." />}
             {tab === 'account' && <AccountPanel account={data.account} now={now} />}
           </section>
@@ -159,6 +161,7 @@ function countFor(tab: Tab, d: Dashboard, closed: Position[]): number {
     case 'trades': return d.trades.length
     case 'history': return closed.length
     case 'stats': return d.stats.closedPositions
+    case 'learning': return d.entries.length
     case 'tokens': return d.tokenUsage.length
     case 'account': return d.account.balances.filter((b) => !b.isDust).length
   }
@@ -501,3 +504,139 @@ const screenColumns: Column<ScreenResult>[] = [
 ]
 
 const compactUsd = (v: number) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', notation: 'compact', maximumFractionDigits: 1 }).format(v)
+
+const isClosed = (e: EntryAnalysis) => e.outcome === 'win' || e.outcome === 'loss'
+const isFilled = (e: EntryAnalysis) => e.positionId != null
+const predictedNet = (e: EntryAnalysis) => e.opportunityContext?.screen?.sim?.avgNetPct ?? null
+const predictedWin = (e: EntryAnalysis) => e.opportunityContext?.screen?.sim?.winRatePct ?? null
+
+function avg(values: (number | null | undefined)[]): number | null {
+  const v = values.filter((x): x is number => x != null)
+  return v.length === 0 ? null : v.reduce((a, b) => a + b, 0) / v.length
+}
+
+function rsiBucket(rsi: number | null | undefined): string {
+  if (rsi == null) return 'unknown'
+  if (rsi < 30) return '< 30 (oversold)'
+  if (rsi < 45) return '30–45'
+  if (rsi < 55) return '45–55'
+  if (rsi < 70) return '55–70'
+  return '≥ 70 (overbought)'
+}
+
+interface Group {
+  key: string
+  entries: number
+  filled: number
+  wins: number
+  losses: number
+  pnlUsd: number
+  actualNetPct: number | null
+  predictedNetPct: number | null
+  predictedWinPct: number | null
+}
+
+function groupBy(rows: EntryAnalysis[], keyOf: (e: EntryAnalysis) => string): Group[] {
+  const map = new Map<string, EntryAnalysis[]>()
+  for (const e of rows) map.set(keyOf(e), [...(map.get(keyOf(e)) ?? []), e])
+  return [...map.entries()]
+    .map(([key, es]) => {
+      const closed = es.filter(isClosed)
+      return {
+        key,
+        entries: es.length,
+        filled: es.filter(isFilled).length,
+        wins: closed.filter((e) => e.outcome === 'win').length,
+        losses: closed.filter((e) => e.outcome === 'loss').length,
+        pnlUsd: closed.reduce((a, e) => a + (e.realizedPnlUsd ?? 0), 0),
+        actualNetPct: avg(closed.map((e) => e.actualNetPct)),
+        predictedNetPct: avg(closed.map(predictedNet)),
+        predictedWinPct: avg(closed.map(predictedWin)),
+      }
+    })
+    .sort((a, b) => b.entries - a.entries || a.key.localeCompare(b.key))
+}
+
+const groupColumns = (label: string): Column<Group>[] => [
+  { header: label, cell: (g) => <strong>{g.key}</strong> },
+  { header: 'Entries', cell: (g) => g.entries, align: 'right' },
+  { header: 'Filled', cell: (g) => `${g.filled} (${pct((g.filled / g.entries) * 100, 0)})`, align: 'right' },
+  {
+    header: 'W/L',
+    cell: (g) => {
+      const n = g.wins + g.losses
+      if (n === 0) return '—'
+      return <span title={g.predictedWinPct == null ? undefined : `Replay predicted ${g.predictedWinPct.toFixed(0)}% wins`}>{g.wins}/{g.losses} <span className="muted">({((g.wins / n) * 100).toFixed(0)}%{g.predictedWinPct == null ? '' : ` vs ${g.predictedWinPct.toFixed(0)}%`})</span></span>
+    },
+    align: 'right',
+  },
+  { header: 'Predicted net', cell: (g) => pctCell(g.predictedNetPct, 2), align: 'right' },
+  { header: 'Actual net', cell: (g) => pctCell(g.actualNetPct, 2), align: 'right' },
+  { header: 'P&L', cell: (g) => (g.wins + g.losses ? money(g.pnlUsd) : '—'), align: 'right', className: (g) => signClass(g.pnlUsd) },
+]
+
+function LearningPanel({ rows }: { rows: EntryAnalysis[] }) {
+  if (rows.length === 0)
+    return <p className="empty">No entry orders yet. Each buy the Trader places will show here with the conditions it was placed under and how it turned out.</p>
+  const closed = rows.filter(isClosed)
+  const wins = closed.filter((e) => e.outcome === 'win').length
+  const filled = rows.filter(isFilled).length
+  const settled = rows.filter((e) => e.outcome !== 'waiting' && e.outcome !== 'rejected').length
+  const actual = avg(closed.map((e) => e.actualNetPct))
+  const predicted = avg(closed.map(predictedNet))
+  const predictedWinPct = avg(closed.map(predictedWin))
+  const cards = [
+    { label: 'Entry orders', value: String(rows.length), hint: `${rows.filter((e) => e.outcome === 'waiting').length} waiting · ${rows.filter((e) => e.outcome === 'unfilled').length} never filled` },
+    { label: 'Fill rate', value: settled ? pct((filled / settled) * 100, 0) : '—', hint: 'Filled ÷ orders that have filled or been cancelled' },
+    { label: 'Win rate', value: closed.length ? pct((wins / closed.length) * 100, 0) : '—', hint: predictedWinPct == null ? `${wins} won · ${closed.length - wins} lost` : `Replay predicted ${predictedWinPct.toFixed(0)}% · ${wins} won · ${closed.length - wins} lost` },
+    { label: 'Predicted net / trade', value: predicted == null ? '—' : `${predicted > 0 ? '+' : ''}${predicted.toFixed(2)}%`, className: signClass(predicted), hint: "The replay's average net for these coins when they were published" },
+    { label: 'Actual net / trade', value: actual == null ? '—' : `${actual > 0 ? '+' : ''}${actual.toFixed(2)}%`, className: signClass(actual), hint: 'Realized P&L after both fees ÷ cost, closed trades only' },
+  ]
+  return (
+    <>
+      <p className="muted">
+        Every buy records what Research saw when it published the coin (replay prediction, RSI, trend, news) and what the Trader saw
+        when it placed the order (distance below the band, RSI on 5m candles, spread). Small groups are mostly noise. Look for patterns
+        that hold over 15–20 or more closed trades.
+      </p>
+      <div className="cards">
+        {cards.map((c) => (
+          <div className="card" key={c.label} title={c.hint}>
+            <div className="label">{c.label}</div>
+            <div className={`value ${c.className ?? ''}`}>{c.value}</div>
+            <div className="hint">{c.hint}</div>
+          </div>
+        ))}
+      </div>
+      <h3>By coin</h3>
+      <Table rows={groupBy(rows, (e) => e.asset)} columns={groupColumns('Coin')} rowKey={(g) => g.key} empty="" />
+      <h3>By RSI at entry (5m)</h3>
+      <Table rows={groupBy(rows, (e) => rsiBucket(e.orderContext?.rsi14))} columns={groupColumns('RSI')} rowKey={(g) => g.key} empty="" />
+      <h3>By 1h trend when published</h3>
+      <Table rows={groupBy(rows, (e) => e.opportunityContext?.screen?.trend ?? 'unknown')} columns={groupColumns('Trend')} rowKey={(g) => g.key} empty="" />
+      <h3>Entries</h3>
+      <Table rows={rows} columns={entryColumns} rowKey={(e) => e.orderId} empty="" />
+    </>
+  )
+}
+
+const outcomeClass: Record<EntryAnalysis['outcome'], string> = {
+  win: 'badge ok small', loss: 'badge no small', holding: 'badge warn small', waiting: 'badge small', unfilled: 'badge small', rejected: 'badge no small',
+}
+
+const entryColumns: Column<EntryAnalysis>[] = [
+  { header: 'Placed', cell: (e) => time(e.placedAt) },
+  { header: 'Asset', cell: (e) => <strong>{e.asset}</strong> },
+  { header: 'Outcome', cell: (e) => <span className={outcomeClass[e.outcome]} title={e.closeReason?.replace('_', ' ') ?? e.orderStatus}>{e.outcome}</span> },
+  { header: 'Predicted', cell: (e) => <span title={predictedWin(e) == null ? undefined : `Replay won ${predictedWin(e)!.toFixed(0)}% of trades`}>{pctCell(predictedNet(e), 2)}</span>, align: 'right' },
+  { header: 'Actual', cell: (e) => pctCell(e.actualNetPct, 2), align: 'right' },
+  { header: 'P&L', cell: (e) => money(e.realizedPnlUsd), align: 'right', className: (e) => signClass(e.realizedPnlUsd) },
+  { header: 'RSI', cell: (e) => (e.orderContext?.rsi14 == null ? '—' : e.orderContext.rsi14.toFixed(0)), align: 'right' },
+  { header: 'σ from SMA', cell: (e) => (e.orderContext?.zScore == null ? '—' : e.orderContext.zScore.toFixed(2)), align: 'right' },
+  { header: 'Spread', cell: (e) => (e.orderContext ? pct(e.orderContext.spreadPct, 3) : '—'), align: 'right' },
+  { header: '1h', cell: (e) => pctCell(e.orderContext?.change1hPct), align: 'right' },
+  { header: 'Trend', cell: (e) => e.opportunityContext?.screen?.trend ?? '—' },
+  { header: 'Waited', cell: (e) => (e.fillWaitMinutes == null ? '—' : minutes(e.fillWaitMinutes)), align: 'right' },
+  { header: 'Held', cell: (e) => (e.holdMinutes == null ? '—' : minutes(e.holdMinutes)), align: 'right' },
+  { header: 'News', cell: (e) => <span className="reason" title={e.opportunityContext?.news?.reason}>{e.opportunityContext?.news?.status ?? '—'}</span> },
+]

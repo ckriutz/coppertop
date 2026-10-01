@@ -96,6 +96,15 @@ After screening, Research asks Perplexity Sonar (`perplexity/sonar` through Open
 - Coins already vetoed are skipped without a call. A verdict is reused for `NewsCacheHours` (6h), so the same coin is checked at most about 4 times a day.
 - **Cost**: about $0.005 per call, almost all of it Perplexity's search fee. Every call is recorded through `POST /token-usage` (service `research`, purpose `news-check <ASSET>`) with the cost OpenRouter reports, and shows in the dashboard's token usage. Calls stop for the rest of the UTC day once that day's research spend reaches `NewsDailyBudgetUsd` ($0.25, about 48 calls).
 
+## Predicted vs actual (trade context)
+Every entry records the conditions it was made under, so results can later be compared with predictions. No LLM is involved.
+- **When Research publishes** an opportunity, it sends a `context` with it (stored in `opportunity_context`): the screen metrics (RSI, ATR, trend, spread, volume, 24h/7d change), the replay's prediction (wins/losses, win rate, average net, hold time), the news verdict, and the replay settings.
+- **When the Trader places** an entry order, it sends a `context` with it (stored in `order_context`): bid/ask/spread, SMA, σ, band, how far below the band the ask was, z-score, RSI on 5m closes, 1h and 4h change, hour and weekday (UTC), TP/SL, the opportunity's confidence and age, and open positions and cash.
+- Both are JSON so fields can be added without schema changes. Each has a `version`.
+- `GET /analysis/entries?since=` returns every entry order with both contexts and its outcome: `win`, `loss`, `holding`, `waiting`, `unfilled` or `rejected`, plus fill wait, hold time and actual net % (realized P&L after both fees ÷ cost).
+- The dashboard's **Predicted vs actual** tab shows fill rate, actual against predicted win rate and net per trade, results grouped by coin, by RSI at entry and by trend, and every entry.
+- Entries made before this was added have no context and group as "unknown". Groups under about 15–20 closed trades are mostly noise.
+
 ## Paper fill model
 Paper fills are deliberately pessimistic, so paper P&L shouldn't flatter the strategy:
 - **Entries rest.** A buy is recorded as an `open` order at the bid; no position exists yet. It fills (at the limit) only when a Kraken public trade prints *strictly below* the limit after placement, or the ask drops below it. A print exactly at our price doesn't count, because we don't know our place in the queue.

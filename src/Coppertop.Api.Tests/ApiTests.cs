@@ -394,6 +394,52 @@ public sealed class ApiTests : IDisposable
         Assert.Equal(1, stats.EntryOrders.Cancelled);
         Assert.Equal(200m / 3m, stats.EntryOrders.FillRatePct!.Value, 5);
     }
+
+    [Fact]
+    public async Task AnalysisEntries_JoinsContexts_WithOutcomes()
+    {
+        static System.Text.Json.JsonElement Json(string s) => System.Text.Json.JsonDocument.Parse(s).RootElement.Clone();
+
+        var opp = await CreateOpp(Opp() with { Context = Json("""{"screen":{"rsi14":31.5,"trend":"up","sim":{"avgNetPct":0.4}}}""") });
+        Assert.True((await _client.PostAsync($"/opportunities/{opp.Id}/consume", null)).IsSuccessStatusCode);
+
+        async Task<Order> Entry(string context) =>
+            (await (await _client.PostAsJsonAsync("/orders", new CreateOrderRequest(
+                opp.Id, null, "XBTUSD", "buy", "limit", "entry", 50000m, 0.0002m, "open", null, true, null, Json(context))))
+                .Content.ReadFromJsonAsync<Order>())!;
+
+        var won = await Entry("""{"rsi14":28.2,"spreadPct":0.01}""");
+        var unfilled = await Entry("""{"rsi14":40}""");
+        var waiting = await Entry("""{"rsi14":45}""");
+
+        _factory.Clock.Advance(TimeSpan.FromMinutes(6));
+        var opened = (await (await _client.PostAsJsonAsync($"/orders/{won.Id}/fill",
+            new FillOrderRequest(50000m, 0.0002m, 0.025m, null, 50750m, 49000m, null)))
+            .Content.ReadFromJsonAsync<FillOrderResponse>())!;
+        _factory.Clock.Advance(TimeSpan.FromMinutes(30));
+        var exit = await CreateOrder("sell", "take_profit", opened.Position.Id, 50750m);
+        await _client.PostAsJsonAsync($"/orders/{exit.Id}/fill", new FillOrderRequest(50750m, 0.0002m, 0.02538m, null, null, null, null));
+        await _client.PostAsJsonAsync($"/orders/{unfilled.Id}/cancel", new CancelOrderRequest("timeout"));
+
+        var rows = (await _client.GetFromJsonAsync<List<EntryAnalysis>>("/analysis/entries"))!;
+        Assert.Equal(3, rows.Count);   // exit orders aren't entries
+
+        var w = rows.Single(r => r.OrderId == won.Id);
+        Assert.Equal("win", w.Outcome);
+        Assert.Equal(6m, w.FillWaitMinutes);
+        Assert.Equal(30m, w.HoldMinutes);
+        Assert.Equal(0.09962m / 10.025m * 100m, w.ActualNetPct!.Value, 3);
+        Assert.Equal("take_profit", w.CloseReason);
+        Assert.Equal(28.2m, w.OrderContext!.Value.GetProperty("rsi14").GetDecimal());
+        Assert.Equal(0.4m, w.OpportunityContext!.Value.GetProperty("screen").GetProperty("sim").GetProperty("avgNetPct").GetDecimal());
+
+        Assert.Equal("unfilled", rows.Single(r => r.OrderId == unfilled.Id).Outcome);
+        Assert.Equal("waiting", rows.Single(r => r.OrderId == waiting.Id).Outcome);
+        Assert.Null(rows.Single(r => r.OrderId == waiting.Id).ActualNetPct);
+
+        var plain = await CreateOpp(Opp("ETHUSD"));   // context is optional
+        Assert.Equal("ETHUSD", plain.Asset);
+    }
 }
 
 public sealed class ApiKeyTests : IDisposable

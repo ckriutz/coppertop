@@ -181,6 +181,21 @@ public sealed class Database
             metrics      TEXT    NULL,
             screened_at  TEXT    NOT NULL
         );
+
+        -- What Research saw when it published an opportunity (screen metrics, replay prediction, news verdict), and
+        -- what the Trader saw when it placed an order (band, RSI, spread, ...). JSON so either service can add
+        -- fields without a schema change. Kept in their own tables so existing databases pick them up.
+        CREATE TABLE IF NOT EXISTS opportunity_context (
+            opportunity_id  INTEGER PRIMARY KEY REFERENCES opportunities(id),
+            context         TEXT    NOT NULL,
+            created_at      TEXT    NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS order_context (
+            order_id    INTEGER PRIMARY KEY REFERENCES orders(id),
+            context     TEXT    NOT NULL,
+            created_at  TEXT    NOT NULL
+        );
         """;
 
     private sealed class DateTimeOffsetHandler : SqlMapper.TypeHandler<DateTimeOffset>

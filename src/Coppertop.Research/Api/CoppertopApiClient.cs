@@ -14,7 +14,8 @@ public sealed record CreateOpportunityDto(
     decimal MaxSpendUsd,
     decimal Confidence,
     string Reason,
-    DateTimeOffset ExpiresAt);
+    DateTimeOffset ExpiresAt,
+    object? Context = null);
 
 public sealed record OpportunityDto(long Id, string Asset, string Strategy, decimal MaxEntryPrice, DateTimeOffset ExpiresAt);
 

@@ -92,15 +92,16 @@ public sealed class Worker(
         }
 
         var ranked = Screener.Rank(results, o.MaxOpportunities).ToList();
-        await ApplyNewsAsync(ranked, api, sonar, o, ct);
-        var expires = clock.GetUtcNow().AddHours(o.OpportunityLifetimeHours);
+        var news = await ApplyNewsAsync(ranked, api, sonar, o, ct);
+        var screenedAt = clock.GetUtcNow();
+        var expires = screenedAt.AddHours(o.OpportunityLifetimeHours);
         var published = 0;
 
         foreach (var r in ranked.Where(r => r.Approved))
         {
             var opp = await api.PublishOpportunityAsync(new CreateOpportunityDto(
                 r.Asset, Strategy, r.Metrics!.LastPrice, o.TakeProfitPct, o.StopLossPct, o.MaxSpendUsd,
-                r.Confidence, r.Reason, expires), ct);
+                r.Confidence, r.Reason, expires, OpportunityContext(r, news.GetValueOrDefault(r.Asset), screenedAt, o)), ct);
             if (opp is null)
             {
                 log.LogInformation("{Asset}: approved but vetoed, not published", r.Asset);
@@ -130,9 +131,10 @@ public sealed class Worker(
     /// Checks each approved coin for recent bad news. Bad news vetoes the coin (which also cancels its opportunities)
     /// and rejects it; a coin that couldn't be checked is held back unless PublishWhenNewsUnavailable is set.
     /// </summary>
-    private async Task ApplyNewsAsync(List<ScreenResult> ranked, CoppertopApiClient api, SonarClient sonar, ResearchOptions o, CancellationToken ct)
+    private async Task<Dictionary<string, NewsOutcome>> ApplyNewsAsync(List<ScreenResult> ranked, CoppertopApiClient api, SonarClient sonar, ResearchOptions o, CancellationToken ct)
     {
-        if (!ranked.Any(r => r.Approved)) return;
+        var outcomes = new Dictionary<string, NewsOutcome>(StringComparer.OrdinalIgnoreCase);
+        if (!ranked.Any(r => r.Approved)) return outcomes;
 
         var vetoes = (await api.GetActiveVetoesAsync(ct)).GroupBy(v => v.Asset, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
@@ -155,6 +157,7 @@ public sealed class Worker(
 
             var outcome = await news.CheckAsync(r.Asset, sonar.Enabled, spent, o, estimate,
                 (asset, token) => sonar.CheckNewsAsync(asset, o.NewsLookbackHours, token), ct);
+            outcomes[r.Asset] = outcome;
 
             if (outcome.Fresh is { } fresh)
             {
@@ -183,5 +186,24 @@ public sealed class Worker(
                     break;
             }
         }
+        return outcomes;
     }
+
+    /// <summary>
+    /// What Research knew when it published: the screen metrics (incl. the replay's prediction), the news verdict
+    /// and the settings the replay used. Stored with the opportunity so trades can be compared with predictions.
+    /// </summary>
+    public static object OpportunityContext(ScreenResult r, NewsOutcome? news, DateTimeOffset screenedAt, ResearchOptions o) => new
+    {
+        version = 1,
+        screenedAt,
+        confidence = r.Confidence,
+        screen = r.Metrics,
+        news = news is null ? null : new { status = news.Status.ToString().ToLowerInvariant(), reason = news.Reason },
+        replay = new
+        {
+            o.CandleIntervalMinutes, o.SmaPeriod, o.BandStdDevs, o.TakeProfitPct, o.StopLossPct,
+            o.MakerFeePct, o.TakerFeePct, o.StopLossSlippagePct,
+        },
+    };
 }

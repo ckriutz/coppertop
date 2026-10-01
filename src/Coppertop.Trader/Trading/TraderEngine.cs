@@ -130,7 +130,8 @@ public sealed class TraderEngine
                 continue;
             }
 
-            if (await PlaceEntryAsync(opp, pair, decision.Plan, ct))
+            var context = EntryContext.Build(opp, ticker, closes, decision.Plan, portfolio, _clock.GetUtcNow(), _o);
+            if (await PlaceEntryAsync(opp, pair, decision.Plan, context, ct))
             {
                 var cost = decision.Plan.SpendUsd + FeeMath.Fee(decision.Plan.SpendUsd, _o.MakerFeePct);
                 exposure[opp.Asset] = cost;
@@ -334,7 +335,7 @@ public sealed class TraderEngine
         }
     }
 
-    private async Task<bool> PlaceEntryAsync(OpportunityDto opp, PairInfo pair, EntryPlan plan, CancellationToken ct)
+    private async Task<bool> PlaceEntryAsync(OpportunityDto opp, PairInfo pair, EntryPlan plan, object context, CancellationToken ct)
     {
         if (!await _api.TryConsumeOpportunityAsync(opp.Id, ct))
         {
@@ -357,7 +358,7 @@ public sealed class TraderEngine
                 _log.LogWarning("{Asset}: Kraken rejected order during validation: {Message}", opp.Asset, ex.Message);
                 await _api.CreateOrderAsync(new CreateOrderDto(
                     opp.Id, null, opp.Asset, "buy", "limit", "entry", plan.EntryPrice, plan.Volume,
-                    "rejected", null, true, ex.Message), ct);
+                    "rejected", null, true, ex.Message, context), ct);
                 return false;
             }
         }
@@ -365,7 +366,7 @@ public sealed class TraderEngine
         // No position yet: the order rests until the market trades through it (or it times out).
         var order = await _api.CreateOrderAsync(new CreateOrderDto(
             opp.Id, null, opp.Asset, "buy", "limit", "entry", plan.EntryPrice, plan.Volume,
-            "open", null, true, note), ct);
+            "open", null, true, note, context), ct);
 
         _log.LogInformation("{Asset}: PLACED paper buy {Id}: {Volume} @ {Price} (${Spend:F2}) – {Rationale}",
             opp.Asset, order.Id, plan.Volume, plan.EntryPrice, plan.SpendUsd, plan.Rationale);

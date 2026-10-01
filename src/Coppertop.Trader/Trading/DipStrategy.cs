@@ -9,7 +9,11 @@ public sealed record EntryPlan(
     decimal SpendUsd,
     decimal TakeProfitPrice,
     decimal StopLossPrice,
-    string Rationale);
+    string Rationale,
+    DipSignal? Signal = null);
+
+/// <summary>The band the entry was measured against, kept for the entry's recorded context.</summary>
+public sealed record DipSignal(decimal Sma, decimal StdDev, decimal Band);
 
 public sealed record EntryDecision(EntryPlan? Plan, string Reason)
 {
@@ -74,7 +78,7 @@ public static class DipStrategy
 
         return new EntryDecision(
             new EntryPlan(entry, volume, entry * volume, tp, sl,
-                $"ask {ticker.Ask} <= band {band:F8}; tp {tp} sl {sl}"),
+                $"ask {ticker.Ask} <= band {band:F8}; tp {tp} sl {sl}", new DipSignal(sma, sd, band)),
             "enter");
     }
 

@@ -129,3 +129,21 @@ public class NewsGateTests
         Assert.Equal(2, calls);   // retried next cycle
     }
 }
+
+public class OpportunityContextTests
+{
+    [Fact]
+    public void Context_CarriesPredictionNewsAndSettings()
+    {
+        var sim = new Coppertop.Research.Screening.SimMetrics(5, 4, 1, 0, 80m, 73m, 0.4m, 120m, 60m);
+        var metrics = new Coppertop.Research.Screening.ScreenMetrics(100m, 0.05m, 5_000_000m, -1m, 3m, 31.5m, 0.8m, "up", sim);
+        var r = new Coppertop.Research.Screening.ScreenResult("ETHUSD", true, 0.42m, "ok", metrics);
+        var ctx = Worker.OpportunityContext(r, new NewsOutcome(NewsStatus.Clear, "quiet"), DateTimeOffset.UnixEpoch, new ResearchOptions());
+
+        var json = System.Text.Json.JsonSerializer.SerializeToElement(ctx, new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web));
+        Assert.Equal(0.4m, json.GetProperty("screen").GetProperty("sim").GetProperty("avgNetPct").GetDecimal());
+        Assert.Equal(31.5m, json.GetProperty("screen").GetProperty("rsi14").GetDecimal());
+        Assert.Equal("clear", json.GetProperty("news").GetProperty("status").GetString());
+        Assert.Equal(1.5m, json.GetProperty("replay").GetProperty("takeProfitPct").GetDecimal());
+    }
+}

@@ -342,3 +342,35 @@ public class AccountValuationTests
         Assert.Equal(expected, AccountValuation.IsDust((decimal)balance, pair, (decimal)bid));
     }
 }
+
+public class EntryContextTests
+{
+    [Fact]
+    public void Build_RecordsBandRsiAndTiming()
+    {
+        var o = new TraderOptions { SmaPeriod = 5, BandStdDevs = 1m, CandleIntervalMinutes = 5 };
+        var pair = new PairInfo("XXBTZUSD", "XBTUSD", 1, 8, 0.00005m, 0.5m);
+        var portfolio = new PortfolioState(100m, 1, new Dictionary<string, decimal>());
+        var now = new DateTimeOffset(2026, 3, 4, 15, 30, 0, TimeSpan.Zero);
+        var opp = new OpportunityDto(1, "XBTUSD", "dip", 1000m, 1.5m, 2.0m, 12m, 0.7m, "test", now.AddHours(4), now.AddMinutes(-45));
+        // 20 falling closes then the 5-candle window the band is measured on.
+        var closes = Enumerable.Range(0, 20).Select(i => 120m - i).Concat([98m, 102m, 98m, 102m, 100m]).ToList();
+        var ticker = new Ticker("XBTUSD", 97.1m, 97.0m, 97.0m);
+
+        var plan = DipStrategy.Evaluate(opp, ticker, closes, pair, portfolio, o).Plan!;
+        var json = System.Text.Json.JsonSerializer.SerializeToElement(
+            EntryContext.Build(opp, ticker, closes, plan, portfolio, now, o), new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web));
+
+        Assert.Equal(100m, json.GetProperty("sma").GetDecimal());
+        Assert.True(json.GetProperty("zScore").GetDecimal() < -1m);              // ask is below sma - 1σ
+        Assert.True(json.GetProperty("askBelowBandPct").GetDecimal() > 0m);
+        Assert.InRange(json.GetProperty("rsi14").GetDecimal(), 0m, 100m);
+        Assert.Equal(15, json.GetProperty("hourUtc").GetInt32());
+        Assert.Equal(45m, json.GetProperty("opportunityAgeMinutes").GetDecimal());
+        Assert.Equal(Math.Round((97m / 108m - 1m) * 100m, 4), json.GetProperty("change1hPct").GetDecimal()); // close 12 candles back = 108
+        Assert.Equal(0.7m, json.GetProperty("opportunityConfidence").GetDecimal());
+    }
+
+    [Fact]
+    public void Rsi_NeedsMoreThanPeriodCloses() => Assert.Null(Indicators.Rsi([1m, 2m, 3m]));
+}

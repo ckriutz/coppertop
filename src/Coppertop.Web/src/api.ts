@@ -196,6 +196,65 @@ export interface ScreenResult {
   screenedAt: string
 }
 
+/** What Research knew when it published the opportunity (version 1). */
+export interface OpportunityContext {
+  version: number
+  screenedAt: string
+  confidence: number
+  screen: ScreenMetrics | null
+  news: { status: string; reason: string } | null
+  replay: { takeProfitPct: number; stopLossPct: number; candleIntervalMinutes: number; smaPeriod: number; bandStdDevs: number }
+}
+
+/** What the Trader saw when it placed the entry order (version 1). */
+export interface EntryContext {
+  version: number
+  placedAt: string
+  hourUtc: number
+  dayOfWeek: string
+  bid: number
+  ask: number
+  spreadPct: number
+  sma: number | null
+  band: number | null
+  askBelowBandPct: number | null
+  zScore: number | null
+  rsi14: number | null
+  change1hPct: number | null
+  change4hPct: number | null
+  opportunityConfidence: number
+  opportunityAgeMinutes: number | null
+  openPositions: number
+}
+
+/** One entry order: the predicted conditions and what actually happened. */
+export interface EntryAnalysis {
+  orderId: number
+  asset: string
+  opportunityId: number | null
+  placedAt: string
+  outcome: 'win' | 'loss' | 'holding' | 'waiting' | 'unfilled' | 'rejected'
+  orderStatus: string
+  orderNote: string | null
+  orderPrice: number
+  fillWaitMinutes: number | null
+  positionId: number | null
+  openedAt: string | null
+  closedAt: string | null
+  holdMinutes: number | null
+  entryPrice: number | null
+  exitPrice: number | null
+  costUsd: number | null
+  realizedPnlUsd: number | null
+  actualNetPct: number | null
+  closeReason: string | null
+  confidence: number | null
+  takeProfitPct: number | null
+  stopLossPct: number | null
+  opportunityContext: OpportunityContext | null
+  orderContext: EntryContext | null
+}
+
 export interface Dashboard {
   summary: Summary
   openPositions: Position[]
@@ -210,6 +269,7 @@ export interface Dashboard {
   stats: Stats
   account: Account
   screen: ScreenResult[]
+  entries: EntryAnalysis[]
 }
 
 async function get<T>(path: string, signal?: AbortSignal): Promise<T> {
@@ -233,7 +293,7 @@ export const setEntriesPaused = (entriesPaused: boolean) => send<Control>('PUT',
 export const requestFlatten = () => send<Control>('POST', '/control/flatten')
 
 export async function loadDashboard(signal?: AbortSignal): Promise<Dashboard> {
-  const [summary, openPositions, positions, orders, trades, opportunities, vetoes, tokenUsage, marks, control, stats, account, screen] = await Promise.all([
+  const [summary, openPositions, positions, orders, trades, opportunities, vetoes, tokenUsage, marks, control, stats, account, screen, entries] = await Promise.all([
     get<Summary>('/summary', signal),
     get<Position[]>('/positions?status=open', signal),
     get<Position[]>('/positions', signal),
@@ -247,10 +307,11 @@ export async function loadDashboard(signal?: AbortSignal): Promise<Dashboard> {
     get<Stats>('/stats', signal),
     get<Account>('/account', signal),
     get<ScreenResult[]>('/research/screen', signal),
+    get<EntryAnalysis[]>('/analysis/entries', signal),
   ])
   return {
     summary, openPositions, positions, orders, trades, opportunities, vetoes, tokenUsage,
     marks: Object.fromEntries(marks.map((m) => [m.asset, m])),
-    control, stats, account, screen,
+    control, stats, account, screen, entries,
   }
 }

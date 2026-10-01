@@ -28,4 +28,26 @@ public static class Indicators
         var variance = window.Sum(c => (c - mean) * (c - mean)) / period;
         return (mean, (decimal)Math.Sqrt((double)variance));
     }
+
+    /// <summary>Wilder's RSI over all closes (same as Research's), or null if there aren't enough.</summary>
+    public static decimal? Rsi(IReadOnlyList<decimal> closes, int period = 14)
+    {
+        if (closes.Count <= period) return null;
+        decimal gain = 0, loss = 0;
+        for (var i = 1; i <= period; i++)
+        {
+            var d = closes[i] - closes[i - 1];
+            if (d > 0) gain += d; else loss -= d;
+        }
+        gain /= period;
+        loss /= period;
+        for (var i = period + 1; i < closes.Count; i++)
+        {
+            var d = closes[i] - closes[i - 1];
+            gain = (gain * (period - 1) + Math.Max(d, 0)) / period;
+            loss = (loss * (period - 1) + Math.Max(-d, 0)) / period;
+        }
+        if (loss == 0) return gain == 0 ? 50m : 100m;
+        return 100m - 100m / (1m + gain / loss);
+    }
 }

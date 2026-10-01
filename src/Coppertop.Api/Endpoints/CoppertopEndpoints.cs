@@ -20,7 +20,63 @@ public static class CoppertopEndpoints
         MapControl(app);
         MapAccount(app);
         MapResearch(app);
+        MapAnalysis(app);
     }
+
+    private static void MapAnalysis(WebApplication app)
+    {
+        // Predicted vs actual: every entry order with the context Research and the Trader recorded, and its outcome.
+        app.MapGet("/analysis/entries", (Database db, DateTimeOffset? since) =>
+        {
+            using var c = db.Open();
+            var rows = c.Query<EntryAnalysisRow>("""
+                SELECT o.id AS order_id, o.asset, o.opportunity_id, o.created_at AS placed_at, o.status AS order_status,
+                       o.note AS order_note, o.price AS order_price, o.volume AS order_volume, o.updated_at,
+                       p.id AS position_id, p.status AS position_status, p.opened_at, p.closed_at, p.entry_price,
+                       p.exit_price, p.cost_usd, p.realized_pnl_usd, p.close_reason,
+                       op.confidence, op.take_profit_pct, op.stop_loss_pct,
+                       oc.context AS opportunity_context, ec.context AS order_context
+                FROM orders o
+                LEFT JOIN positions p ON p.id = o.position_id
+                LEFT JOIN opportunities op ON op.id = o.opportunity_id
+                LEFT JOIN opportunity_context oc ON oc.opportunity_id = o.opportunity_id
+                LEFT JOIN order_context ec ON ec.order_id = o.id
+                WHERE o.side = 'buy' AND o.purpose = 'entry' AND o.created_at >= @since
+                ORDER BY o.id DESC
+                LIMIT 2000
+                """, new { since = Database.Ts(since ?? DateTimeOffset.UnixEpoch) });
+            return Results.Ok(rows.Select(ToEntryAnalysis));
+        });
+    }
+
+    private static EntryAnalysis ToEntryAnalysis(EntryAnalysisRow r)
+    {
+        static decimal Minutes(DateTimeOffset from, DateTimeOffset to) => Math.Round((decimal)(to - from).TotalMinutes, 1);
+        static System.Text.Json.JsonElement? Json(string? s) =>
+            s is null ? null : System.Text.Json.JsonDocument.Parse(s).RootElement.Clone();
+
+        var outcome = r.PositionStatus switch
+        {
+            PositionStatus.Closed when r.RealizedPnlUsd > 0 => "win",
+            PositionStatus.Closed => "loss",
+            PositionStatus.Open => "holding",
+            _ => OrderStatuses.Pending.Contains(r.OrderStatus) ? "waiting" : "unfilled",
+        };
+        if (r.OrderStatus == "rejected") outcome = "rejected";
+
+        return new EntryAnalysis(
+            r.OrderId, r.Asset, r.OpportunityId, r.PlacedAt, outcome, r.OrderStatus, r.OrderNote, r.OrderPrice,
+            r.OpenedAt is { } opened ? Minutes(r.PlacedAt, opened) : null,
+            r.PositionId, r.OpenedAt, r.ClosedAt,
+            r.OpenedAt is { } o2 && r.ClosedAt is { } closed ? Minutes(o2, closed) : null,
+            r.EntryPrice, r.ExitPrice, r.CostUsd, r.RealizedPnlUsd,
+            r.RealizedPnlUsd is { } pnl && r.CostUsd is > 0 ? Math.Round(pnl / r.CostUsd.Value * 100m, 4) : null,
+            r.CloseReason, r.Confidence, r.TakeProfitPct, r.StopLossPct,
+            Json(r.OpportunityContext), Json(r.OrderContext));
+    }
+
+    private static string? ContextJson(System.Text.Json.JsonElement? context) =>
+        context is { ValueKind: System.Text.Json.JsonValueKind.Object } c ? c.GetRawText() : null;
 
     private static void MapResearch(WebApplication app)
     {
@@ -180,6 +236,9 @@ public static class CoppertopEndpoints
                     req.Confidence, req.Reason, status = OpportunityStatus.Active,
                     createdAt = Database.Ts(now), expiresAt = Database.Ts(req.ExpiresAt)
                 }, tx);
+            if (ContextJson(req.Context) is { } context)
+                c.Execute("INSERT INTO opportunity_context (opportunity_id, context, created_at) VALUES (@id, @context, @now)",
+                    new { id, context, now = Database.Ts(now) }, tx);
             tx.Commit();
 
             var created = c.QuerySingle<Opportunity>("SELECT * FROM opportunities WHERE id = @id", new { id });
@@ -339,6 +398,7 @@ public static class CoppertopEndpoints
 
             var now = Database.Ts(clock.GetUtcNow());
             using var c = db.Open();
+            using var tx = c.BeginTransaction();
             var id = c.ExecuteScalar<long>("""
                 INSERT INTO orders (opportunity_id, position_id, asset, side, order_type, purpose, price, volume,
                     status, kraken_tx_id, is_simulated, note, created_at, updated_at)
@@ -351,7 +411,11 @@ public static class CoppertopEndpoints
                     req.OpportunityId, req.PositionId, asset = Normalize(req.Asset), side = req.Side.ToLowerInvariant(),
                     req.OrderType, req.Purpose, req.Price, req.Volume, req.Status, req.KrakenTxId, req.IsSimulated,
                     req.Note, now
-                });
+                }, tx);
+            if (ContextJson(req.Context) is { } context)
+                c.Execute("INSERT INTO order_context (order_id, context, created_at) VALUES (@id, @context, @now)",
+                    new { id, context, now }, tx);
+            tx.Commit();
             return Results.Created($"/orders/{id}", c.QuerySingle<Order>("SELECT * FROM orders WHERE id = @id", new { id }));
         });
 

@@ -52,7 +52,8 @@ public sealed record CreateOpportunityRequest(
     decimal MaxSpendUsd,
     decimal Confidence,
     string Reason,
-    DateTimeOffset ExpiresAt);
+    DateTimeOffset ExpiresAt,
+    System.Text.Json.JsonElement? Context = null);
 
 public sealed class Veto
 {
@@ -129,7 +130,8 @@ public sealed record CreateOrderRequest(
     string Status,
     string? KrakenTxId,
     bool IsSimulated,
-    string? Note);
+    string? Note,
+    System.Text.Json.JsonElement? Context = null);
 
 public sealed record UpdateOrderRequest(string Status, string? KrakenTxId, string? Note);
 
@@ -272,6 +274,63 @@ public sealed class ScreenRow
     public string? Metrics { get; set; }
     public DateTimeOffset ScreenedAt { get; set; }
 }
+
+public sealed class EntryAnalysisRow
+{
+    public long OrderId { get; set; }
+    public string Asset { get; set; } = "";
+    public long? OpportunityId { get; set; }
+    public DateTimeOffset PlacedAt { get; set; }
+    public string OrderStatus { get; set; } = "";
+    public string? OrderNote { get; set; }
+    public decimal OrderPrice { get; set; }
+    public decimal OrderVolume { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
+    public long? PositionId { get; set; }
+    public string? PositionStatus { get; set; }
+    public DateTimeOffset? OpenedAt { get; set; }
+    public DateTimeOffset? ClosedAt { get; set; }
+    public decimal? EntryPrice { get; set; }
+    public decimal? ExitPrice { get; set; }
+    public decimal? CostUsd { get; set; }
+    public decimal? RealizedPnlUsd { get; set; }
+    public string? CloseReason { get; set; }
+    public decimal? Confidence { get; set; }
+    public decimal? TakeProfitPct { get; set; }
+    public decimal? StopLossPct { get; set; }
+    public string? OpportunityContext { get; set; }
+    public string? OrderContext { get; set; }
+}
+
+/// <summary>
+/// One entry order with what was predicted (Research's context) and what happened (fill, exit, P&L).
+/// ActualNetPct is realized P&L after both fees as a % of cost.
+/// </summary>
+public sealed record EntryAnalysis(
+    long OrderId,
+    string Asset,
+    long? OpportunityId,
+    DateTimeOffset PlacedAt,
+    string Outcome,
+    string OrderStatus,
+    string? OrderNote,
+    decimal OrderPrice,
+    decimal? FillWaitMinutes,
+    long? PositionId,
+    DateTimeOffset? OpenedAt,
+    DateTimeOffset? ClosedAt,
+    decimal? HoldMinutes,
+    decimal? EntryPrice,
+    decimal? ExitPrice,
+    decimal? CostUsd,
+    decimal? RealizedPnlUsd,
+    decimal? ActualNetPct,
+    string? CloseReason,
+    decimal? Confidence,
+    decimal? TakeProfitPct,
+    decimal? StopLossPct,
+    System.Text.Json.JsonElement? OpportunityContext,
+    System.Text.Json.JsonElement? OrderContext);
 
 public sealed record ScreenResult(string Asset, bool Approved, decimal Confidence, string Reason, System.Text.Json.JsonElement? Metrics, DateTimeOffset ScreenedAt);
 
