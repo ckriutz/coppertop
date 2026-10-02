@@ -19,7 +19,8 @@ public static class EntryContext
         TraderOptions o)
     {
         var s = plan.Signal;
-        var candlesPerHour = Math.Max(1, 60 / Math.Max(1, o.CandleIntervalMinutes));
+        var signal = SignalSettings.For(opp, o);
+        var candlesPerHour = Math.Max(1, 60 / Math.Max(1, signal.CandleIntervalMinutes));
         decimal? Change(int candlesBack) =>
             closes.Count > candlesBack && closes[^(candlesBack + 1)] != 0
                 ? Math.Round((ticker.Last / closes[^(candlesBack + 1)] - 1m) * 100m, 4)
@@ -27,7 +28,7 @@ public static class EntryContext
 
         return new
         {
-            version = 1,
+            version = 2,
             placedAt = now,
             hourUtc = now.UtcDateTime.Hour,
             dayOfWeek = now.UtcDateTime.DayOfWeek.ToString(),
@@ -54,9 +55,11 @@ public static class EntryContext
             opportunityAgeMinutes = opp.CreatedAt is { } created ? Math.Round((decimal)(now - created).TotalMinutes, 1) : (decimal?)null,
             openPositions = portfolio.OpenPositions,
             availableCashUsd = Math.Round(portfolio.AvailableCashUsd, 2),
-            candleIntervalMinutes = o.CandleIntervalMinutes,
-            smaPeriod = o.SmaPeriod,
-            bandStdDevs = o.BandStdDevs,
+            candleIntervalMinutes = signal.CandleIntervalMinutes,
+            smaPeriod = signal.SmaPeriod,
+            bandStdDevs = signal.BandStdDevs,
+            maxHoldMinutes = signal.MaxHoldMinutes,
+            tunedSignal = opp.CandleIntervalMinutes is not null,
         };
     }
 }

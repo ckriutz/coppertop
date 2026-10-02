@@ -78,14 +78,17 @@ When Kraken credentials are set, the Trader's `AccountWorker` reads the real acc
 - These are real balances and are separate from the paper P&L. Paper trading doesn't touch them.
 
 ## Research screener
-Each cycle, Research screens every watchlist coin using Kraken public data only (tickers, 5m and 1h candles, 1.1s between calls to respect the rate limit it shares with the Trader). No tokens are spent.
+Each cycle, Research screens every watchlist coin using Kraken public data only (tickers, 15m and 1h candles, 1.1s between calls to respect the rate limit it shares with the Trader). No tokens are spent.
 - **Hard rules** (all reasons are listed): spread > `MaxSpreadPct` (0.30%), 24h volume < `MinVolume24hUsd` ($1M), 24h drop > `MaxDrop24hPct` (8%), 1h downtrend (SMA50 < SMA200, if `RejectDowntrend`).
-- **Dip replay**: it replays the Trader's dip strategy over the last ~60h of 5m candles (entry below SMA20 − 1.5σ, TP/SL from Research's own options, maker fee on TP, taker fee + slippage on SL; if a candle hits both, the stop wins). A coin needs at least `MinSimTrades` (3) resolved trades and an average net > `MinSimAvgNetPct` (0%).
-- **Confidence** is the 95% Wilson lower bound of the replay win rate. Only the top `MaxOpportunities` (5) by average net are published, as `dip` opportunities that expire after 4h.
+- **Dip replay**: it replays the Trader's dip strategy over the last ~180h of 15m candles (entry below SMA20 − kσ, maker fee on TP, taker fee + slippage on SL and time stop; if a candle hits both, the stop wins).
+- **Per-coin tuning (walk-forward)**: every combination of TP (`TuneTakeProfitPcts`, default 1–3%), SL (`TuneStopLossPcts`, 1–3%), band k (`TuneBandStdDevs`, 1.5/2/2.5) and time stop (`TuneMaxHoldHours`, 4/12/24h/none) is replayed on the older `TuneTrainFraction` (2/3) of the candles. TPs that net less than `MinNetProfitPct` (0.30%) per win are skipped. The best total net with at least `MinSimTrades` (3) resolved trades wins, and is then replayed on the newer 1/3 it never saw. A coin is approved only if that test part has at least `MinTestTrades` (2) resolved trades and an average net > `MinSimAvgNetPct` (0%). Most training winners lose on the test part; that's the check working.
+- **Time stop**: a position held longer than the tuned hold is sold at market (bid less slippage, taker fee), with reason `time_stop`.
+- **Confidence** is the 95% Wilson lower bound of the win rate of the chosen setting over the whole period. Only the top `MaxOpportunities` (5) by test average net are published, as `dip` opportunities that expire after 4h.
+- **Signal passed to the Trader**: each opportunity carries its tuned TP/SL plus a signal (candle interval, SMA period, band k, max hold minutes), stored in the `opportunity_signal` table (created automatically, so existing databases on the Pi just gain the table). The Trader uses it instead of its own defaults; opportunities without a signal use the Trader's `CandleIntervalMinutes`/`SmaPeriod`/`BandStdDevs` and `MaxHoldMinutes` (0 = no time stop).
 - Coins that stop passing have their active `dip` opportunity cancelled.
 - All results (approved and rejected, with metrics and reasons) go to `POST /research/screen` and show on the dashboard **Research** tab (`GET /research/screen`).
-- The replay settings (`CandleIntervalMinutes`, `SmaPeriod`, `BandStdDevs`, TP/SL, fees, slippage) must be kept in step with the Trader's, or the replay stops describing what the Trader does.
-- With TP +1.5% / SL −2%, a win nets about +0.99% and a loss about −2.73% after fees, so the strategy needs about a **73% win rate** to break even. On the first live run, no coin reached that, so nothing was approved. That is the screener doing its job.
+- The fee and slippage settings, and the default `CandleIntervalMinutes` (15) / `SmaPeriod`, must be kept in step with the Trader's, or the replay stops describing what the Trader does.
+- With TP +1.5% / SL −2%, a win nets about +0.99% and a loss about −2.73% after fees, so the untuned strategy needs about a **73% win rate** to break even. Tuning lets each coin pick its own ratio. The test part is short (~60h, often 2–5 trades), so an approval is thin evidence; the Predicted vs actual tab is where it gets confirmed or not.
 
 ## News vetoes (Sonar)
 After screening, Research asks Perplexity Sonar (`perplexity/sonar` through OpenRouter, `OpenRouter:ApiKey`) about each coin that passed, and only those, so a normal cycle makes 0–5 calls.
@@ -99,7 +102,7 @@ After screening, Research asks Perplexity Sonar (`perplexity/sonar` through Open
 ## Predicted vs actual (trade context)
 Every entry records the conditions it was made under, so results can later be compared with predictions. No LLM is involved.
 - **When Research publishes** an opportunity, it sends a `context` with it (stored in `opportunity_context`): the screen metrics (RSI, ATR, trend, spread, volume, 24h/7d change), the replay's prediction (wins/losses, win rate, average net, hold time), the news verdict, and the replay settings.
-- **When the Trader places** an entry order, it sends a `context` with it (stored in `order_context`): bid/ask/spread, SMA, σ, band, how far below the band the ask was, z-score, RSI on 5m closes, 1h and 4h change, hour and weekday (UTC), TP/SL, the opportunity's confidence and age, and open positions and cash.
+- **When the Trader places** an entry order, it sends a `context` with it (stored in `order_context`): bid/ask/spread, SMA, σ, band, how far below the band the ask was, z-score, RSI on the signal's candle closes, 1h and 4h change, the signal used (band k, interval, max hold), hour and weekday (UTC), TP/SL, the opportunity's confidence and age, and open positions and cash.
 - Both are JSON so fields can be added without schema changes. Each has a `version`.
 - `GET /analysis/entries?since=` returns every entry order with both contexts and its outcome: `win`, `loss`, `holding`, `waiting`, `unfilled` or `rejected`, plus fill wait, hold time and actual net % (realized P&L after both fees ÷ cost).
 - The dashboard's **Predicted vs actual** tab shows fill rate, actual against predicted win rate and net per trade, results grouped by coin, by RSI at entry and by trend, and every entry.
@@ -119,7 +122,7 @@ Paper fills are deliberately pessimistic, so paper P&L shouldn't flatter the str
 
 ## Known limitations / next steps
 - Research approves coins with plain-code rules and uses Sonar only to veto on news. Next: per-coin memory, so past results and news inform the next run.
-- The dip TP/SL ratio needs about 73% wins to break even; consider a more symmetric TP/SL.
+- Tuning tests on only ~60h of unseen data; a longer history (more candles, or stored candles) would make approvals more trustworthy.
 - Live mode: Kraken supports only one conditional close order per entry, so the take-profit sits on Kraken and the Trader must watch the stop-loss itself.
 - Unrealized P&L uses prices from the Trader's last cycle, so it only updates while the Trader is running.
 - Prices are polled over REST. Switch to WebSocket if polling is too slow.

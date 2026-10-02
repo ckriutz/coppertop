@@ -17,12 +17,25 @@ public sealed class ResearchOptions
     public decimal MinVolume24hUsd { get; set; } = 1_000_000m;
     public decimal MaxDrop24hPct { get; set; } = 8m;
     public bool RejectDowntrend { get; set; } = true;
+    // Tuning: closed replay trades needed in the training part, and in the unseen test part.
     public int MinSimTrades { get; set; } = 3;
+    public int MinTestTrades { get; set; } = 2;
+    // The tuned setting must average more than this per trade (after fees) on the test part.
     public decimal MinSimAvgNetPct { get; set; } = 0m;
     public int MaxOpportunities { get; set; } = 5;
 
-    // Replay of the Trader's dip strategy. Keep in step with the Trader's own settings.
-    public int CandleIntervalMinutes { get; set; } = 5;
+    // Per-coin tuning grid (empty = built-in defaults, see Tuner). 0 in TuneMaxHoldHours means no time stop.
+    public List<decimal> TuneTakeProfitPcts { get; set; } = [];
+    public List<decimal> TuneStopLossPcts { get; set; } = [];
+    public List<decimal> TuneBandStdDevs { get; set; } = [];
+    public List<int> TuneMaxHoldHours { get; set; } = [];
+    public decimal TuneTrainFraction { get; set; } = 0.67m;
+    // Skip TPs whose win wouldn't clear fees by this much (the Trader enforces the same floor).
+    public decimal MinNetProfitPct { get; set; } = 0.30m;
+
+    // Replay of the Trader's dip strategy. 15m candles: Kraken's 720-candle limit gives ~7.5 days to tune on.
+    // TakeProfitPct/StopLossPct/BandStdDevs are the untuned defaults, shown when no setting passes training.
+    public int CandleIntervalMinutes { get; set; } = 15;
     public int SmaPeriod { get; set; } = 20;
     public decimal BandStdDevs { get; set; } = 1.5m;
     public decimal MakerFeePct { get; set; } = 0.25m;

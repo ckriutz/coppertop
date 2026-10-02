@@ -15,7 +15,11 @@ public sealed record CreateOpportunityDto(
     decimal Confidence,
     string Reason,
     DateTimeOffset ExpiresAt,
-    object? Context = null);
+    object? Context = null,
+    SignalDto? Signal = null);
+
+/// <summary>Tuned signal settings the Trader should use for this opportunity. MaxHoldMinutes null = no time stop.</summary>
+public sealed record SignalDto(int CandleIntervalMinutes, int SmaPeriod, decimal BandStdDevs, int? MaxHoldMinutes);
 
 public sealed record OpportunityDto(long Id, string Asset, string Strategy, decimal MaxEntryPrice, DateTimeOffset ExpiresAt);
 

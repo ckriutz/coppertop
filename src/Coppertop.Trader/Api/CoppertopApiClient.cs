@@ -16,7 +16,12 @@ public sealed record OpportunityDto(
     decimal Confidence,
     string Reason,
     DateTimeOffset ExpiresAt,
-    DateTimeOffset? CreatedAt = null);
+    DateTimeOffset? CreatedAt = null,
+    // Research's tuned signal settings; null means use the Trader's own.
+    int? CandleIntervalMinutes = null,
+    int? SmaPeriod = null,
+    decimal? BandStdDevs = null,
+    int? MaxHoldMinutes = null);
 
 public sealed record PositionDto(
     long Id,

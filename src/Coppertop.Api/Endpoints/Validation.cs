@@ -5,7 +5,7 @@ namespace Coppertop.Api.Endpoints;
 public static class Validation
 {
     private static readonly string[] Sides = ["buy", "sell"];
-    private static readonly string[] OrderPurposes = ["entry", "take_profit", "stop_loss", "flatten", "manual"];
+    private static readonly string[] OrderPurposes = ["entry", "take_profit", "stop_loss", "time_stop", "flatten", "manual"];
 
     public static Dictionary<string, string[]> Opportunity(CreateOpportunityRequest r, DateTimeOffset now)
     {
@@ -19,6 +19,13 @@ public static class Validation
         e.Require(r.Confidence is >= 0 and <= 1, "confidence", "Must be between 0 and 1.");
         e.Require(!string.IsNullOrWhiteSpace(r.Reason), "reason", "Required.");
         e.Require(r.ExpiresAt > now, "expiresAt", "Must be in the future.");
+        if (r.Signal is { } s)
+        {
+            e.Require(s.CandleIntervalMinutes is 1 or 5 or 15 or 30 or 60 or 240 or 1440, "signal.candleIntervalMinutes", "Must be a Kraken OHLC interval (1, 5, 15, 30, 60, 240, 1440).");
+            e.Require(s.SmaPeriod is >= 2 and <= 500, "signal.smaPeriod", "Must be in [2, 500].");
+            e.Require(s.BandStdDevs is >= 0 and <= 10, "signal.bandStdDevs", "Must be in [0, 10].");
+            e.Require(s.MaxHoldMinutes is null or > 0, "signal.maxHoldMinutes", "Must be > 0 or null.");
+        }
         return e.Result;
     }
 

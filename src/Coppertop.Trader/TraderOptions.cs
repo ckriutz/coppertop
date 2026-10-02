@@ -19,9 +19,12 @@ public sealed class TraderOptions
     public decimal MinNetProfitPct { get; set; } = 0.30m;
     public decimal MaxSpreadPct { get; set; } = 0.30m;
 
-    public int CandleIntervalMinutes { get; set; } = 5;
+    // Signal defaults, used only when an opportunity doesn't carry Research's tuned settings.
+    public int CandleIntervalMinutes { get; set; } = 15;
     public int SmaPeriod { get; set; } = 20;
     public decimal BandStdDevs { get; set; } = 1.5m;
+    // Market-sell a position held this long without hitting TP or SL (0 = no time stop).
+    public int MaxHoldMinutes { get; set; } = 0;
 
     // Paper fill model: resting limits only fill when the market trades through them.
     public int EntryOrderTimeoutMinutes { get; set; } = 15;

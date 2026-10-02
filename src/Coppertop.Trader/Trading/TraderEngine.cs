@@ -90,7 +90,7 @@ public sealed class TraderEngine
         var (filled, pending) = await ProcessOpenOrdersAsync(openOrders, tickers, trades, pairs, vetoed, control.EntriesPaused, ct);
 
         // Positions filled this cycle are checked against the same trade batch (only prints after their fill count).
-        var closedThisCycle = await ManageExitsAsync(positions.Concat(filled).ToList(), tickers, trades, pairs, ct);
+        var closedThisCycle = await ManageExitsAsync(positions.Concat(filled).ToList(), opportunities, tickers, trades, pairs, ct);
 
         if (control.EntriesPaused)
         {
@@ -122,7 +122,7 @@ public sealed class TraderEngine
                 continue;
             }
 
-            var closes = await _candles.GetClosesAsync(_kraken, opp.Asset, _o.CandleIntervalMinutes, ct);
+            var closes = await _candles.GetClosesAsync(_kraken, opp.Asset, SignalSettings.For(opp, _o).CandleIntervalMinutes, ct);
             var decision = DipStrategy.Evaluate(opp, ticker, closes, pair, portfolio, _o);
             if (decision.Plan is null)
             {
@@ -251,6 +251,7 @@ public sealed class TraderEngine
 
     private async Task<HashSet<long>> ManageExitsAsync(
         IReadOnlyList<PositionDto> positions,
+        IReadOnlyList<OpportunityDto> activeOpportunities,
         IReadOnlyDictionary<string, Ticker> tickers,
         IReadOnlyDictionary<string, IReadOnlyList<PublicTrade>> trades,
         IReadOnlyDictionary<string, PairInfo> pairs,
@@ -262,13 +263,22 @@ public sealed class TraderEngine
         {
             var ticker = tickers.GetValueOrDefault(position.Asset);
             var decimals = pairs.TryGetValue(position.Asset, out var pair) ? pair.PriceDecimals : 8;
-            var fill = PaperFills.Exit(position, trades.GetValueOrDefault(position.Asset) ?? [], ticker, now, _o.StopLossSlippagePct, decimals);
+            var fill = PaperFills.Exit(position, trades.GetValueOrDefault(position.Asset) ?? [], ticker, now, _o.StopLossSlippagePct, decimals)
+                ?? PaperTimeStop.Exit(position, ticker, now, await MaxHoldMinutesAsync(position, activeOpportunities, ct), _o.StopLossSlippagePct, decimals);
             if (fill is null) continue;
 
-            // TP is a resting maker limit; SL is a taker market sell.
+            // TP is a resting maker limit; SL and the time stop are taker market sells.
             if (await CloseAsync(position, fill, ct)) closed.Add(position.Id);
         }
         return closed;
+    }
+
+    /// <summary>The time stop for a position comes from the opportunity it was opened for (usually no longer active).</summary>
+    private async Task<int?> MaxHoldMinutesAsync(PositionDto position, IReadOnlyList<OpportunityDto> active, CancellationToken ct)
+    {
+        var opp = position.OpportunityId is not { } id ? null
+            : active.FirstOrDefault(x => x.Id == id) ?? await _api.GetOpportunityAsync(id, ct);
+        return SignalSettings.For(opp, _o).MaxHoldMinutes;
     }
 
     private async Task<bool> CloseAsync(PositionDto position, PaperFill fill, CancellationToken ct)
@@ -382,12 +392,13 @@ public sealed class CandleCache(TimeProvider clock)
     public async Task<IReadOnlyList<decimal>> GetClosesAsync(KrakenClient kraken, string asset, int intervalMinutes, CancellationToken ct)
     {
         var now = clock.GetUtcNow();
-        if (_cache.TryGetValue(asset, out var hit) && now - hit.At < Ttl) return hit.Closes;
+        var key = $"{asset}|{intervalMinutes}";
+        if (_cache.TryGetValue(key, out var hit) && now - hit.At < Ttl) return hit.Closes;
 
         var candles = await kraken.GetCandlesAsync(asset, intervalMinutes, ct);
         // Kraken's last candle is still forming; only use closed candles.
         var closes = candles.Take(Math.Max(0, candles.Count - 1)).Select(c => c.Close).ToList();
-        _cache[asset] = (now, closes);
+        _cache[key] = (now, closes);
         return closes;
     }
 }

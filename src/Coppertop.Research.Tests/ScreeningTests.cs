@@ -14,6 +14,26 @@ internal static class Candles
     /// <summary>A flat series at 100 with alternating 99.9/100.1 so σ is non-zero.</summary>
     public static List<Candle> Flat(int count, int minutes = 5) =>
         Enumerable.Range(0, count).Select(i => At(i, i % 2 == 0 ? 99.9m : 100.1m, minutes: minutes)).ToList();
+
+    /// <summary>
+    /// 15m series of repeated "flat, dip to 99, then outcome" blocks. A win spikes to 103.5 (clears every TP in the
+    /// grid); a loss drops to 95 (hits every SL). Ends with a still-forming candle.
+    /// </summary>
+    public static List<Candle> Dips(params bool[] wins)
+    {
+        var c = new List<Candle>();
+        void Flat(int n) { for (var k = 0; k < n; k++) c.Add(At(c.Count, c.Count % 2 == 0 ? 99.9m : 100.1m, minutes: 15)); }
+        foreach (var win in wins)
+        {
+            Flat(22);
+            c.Add(At(c.Count, 99m, low: 99m, minutes: 15));
+            c.Add(win
+                ? At(c.Count, 100.1m, high: 103.5m, minutes: 15)
+                : At(c.Count, 99.9m, low: 95m, minutes: 15));
+        }
+        Flat(6);
+        return c;
+    }
 }
 
 public class IndicatorTests
@@ -86,6 +106,33 @@ public class DipSimulatorTests
     }
 
     [Fact]
+    public void TimeStop_SellsAtTheCloseAfterMaxHoldCandles()
+    {
+        var c = Candles.Flat(20);
+        c.Add(Candles.At(20, 99m, low: 99m));
+        for (var i = 21; i < 30; i++) c.Add(Candles.At(i, 99.5m));
+        var r = DipSimulator.Run(c, S with { MaxHoldCandles = 3 });
+
+        Assert.Equal(1, r.TimeStops);
+        Assert.Equal(1, r.Resolved);
+        Assert.Equal(0, r.Wins);
+        Assert.Equal(20m, r.AvgHoldMinutes);                  // entry candle + 3 more, 5 min each
+        Assert.True(r.AvgNetPct is > -0.3m and < -0.2m, $"net {r.AvgNetPct}");  // 99 → 99.5 (+0.5%) less ~0.75% fees and slippage
+
+        Assert.Equal(1, DipSimulator.Run(c, S).Open);          // no time stop: still open at the end
+    }
+
+    [Fact]
+    public void Range_LimitsEntriesAndExits_SoTrainNeverSeesTest()
+    {
+        var c = Candles.Flat(20);
+        c.Add(Candles.At(20, 99m, low: 99m));
+        c.Add(Candles.At(21, 101.5m, high: 101.6m));
+        Assert.Equal(1, DipSimulator.Run(c, S, 0, 21).Open);   // the winning candle is outside the range
+        Assert.Equal(0, DipSimulator.Run(c, S, 21).Trades);    // no entry at or after 21
+    }
+
+    [Fact]
     public void BreakevenWinRate_ReflectsFeesAndAsymmetry()
     {
         var be = DipSimulator.BreakevenWinRatePct(S);
@@ -95,33 +142,39 @@ public class DipSimulatorTests
 
 public class ScreenerTests
 {
-    private static ResearchOptions Options() => new() { MinSimTrades = 1 };
+    private static ResearchOptions Options() => new() { MinSimTrades = 1, MinTestTrades = 1 };
 
     private static Ticker Tick(decimal spreadPct = 0.02m, decimal volume = 100_000m) =>
         new("XBTUSD", 100m, 100m * (1 - spreadPct / 100m), 100m, volume, 100m);
 
-    // 5m series with one dip that recovers to take-profit, plus a trailing still-forming candle.
-    private static List<Candle> WinningFast()
-    {
-        var c = Candles.Flat(20);
-        c.Add(Candles.At(20, 99m, low: 99m));
-        c.Add(Candles.At(21, 101.5m, high: 101.6m));
-        c.Add(Candles.At(22, 100m));
-        return c;
-    }
+    // Four winning dips in training, two in the unseen test part.
+    private static List<Candle> WinningFast() => Candles.Dips(true, true, true, true, true, true);
 
     private static List<Candle> Hourly(Func<int, decimal> price, int count = 250) =>
         Enumerable.Range(0, count).Select(i => Candles.At(i, price(i), minutes: 60)).ToList();
 
     [Fact]
-    public void ApprovesLiquidAsset_WhoseDipReplayMadeMoney()
+    public void ApprovesLiquidAsset_WhoseTunedSettingAlsoWonOnUnseenData()
     {
         var r = Screener.Screen("XBTUSD", Tick(), WinningFast(), Hourly(_ => 100m), Options());
 
         Assert.True(r.Approved, r.Reason);
-        Assert.Equal(1, r.Metrics!.Sim!.Wins);
+        var t = r.Metrics!.Tuned!;
+        Assert.Equal(3.0m, t.TakeProfitPct);                  // every dip spiked 3.5%, so the biggest TP wins
+        Assert.Equal(15, t.CandleIntervalMinutes);
+        Assert.Equal(4, t.Train.Wins);
+        Assert.Equal(2, t.Test.Wins);
+        Assert.Equal(6, r.Metrics.Sim!.Wins);                 // Sim = chosen setting over the whole period
         Assert.Equal("flat", r.Metrics.Trend);
-        Assert.Contains("1W/0L", r.Reason);
+        Assert.Contains("test", r.Reason);
+    }
+
+    [Fact]
+    public void Tuner_SkipsTakeProfitsThatDontClearFees()
+    {
+        var o = new ResearchOptions { TuneTakeProfitPcts = [0.5m, 1.0m], MinNetProfitPct = 0.30m };
+        Assert.All(Tuner.Grid(o, 15), g => Assert.Equal(1.0m, g.Settings.TakeProfitPct));
+        Assert.Equal(16, Tuner.Grid(o, 15).First(g => g.HoldHours == 4).Settings.MaxHoldCandles);
     }
 
     [Fact]
@@ -138,26 +191,37 @@ public class ScreenerTests
     }
 
     [Fact]
-    public void RejectsWhenReplayLostMoney_OrHadTooFewTrades()
+    public void RejectsWhenNothingWonInTraining()
     {
-        var losing = Candles.Flat(20);
-        losing.Add(Candles.At(20, 99m, low: 99m));
-        losing.Add(Candles.At(21, 95m, low: 95m));
-        losing.Add(Candles.At(22, 95m));
-        var lost = Screener.Screen("XBTUSD", Tick(), losing, Hourly(_ => 100m), Options());
-        Assert.False(lost.Approved);
-        Assert.Contains("lost money", lost.Reason);
+        var r = Screener.Screen("XBTUSD", Tick(), Candles.Dips(false, false, false, false, false, false), Hourly(_ => 100m), Options());
+        Assert.False(r.Approved);
+        Assert.Null(r.Metrics!.Tuned);
+        Assert.Contains("no dip setting made money in training", r.Reason);
+        Assert.NotNull(r.Metrics.Sim);                        // default setting still shown
+    }
 
-        var few = Screener.Screen("XBTUSD", Tick(), WinningFast(), Hourly(_ => 100m), new ResearchOptions { MinSimTrades = 3 });
-        Assert.False(few.Approved);
-        Assert.Contains("too few dips", few.Reason);
+    [Fact]
+    public void RejectsWhenTheTunedSettingLostOnUnseenData()
+    {
+        var r = Screener.Screen("XBTUSD", Tick(), Candles.Dips(true, true, true, true, false, false), Hourly(_ => 100m), Options());
+        Assert.False(r.Approved);
+        Assert.NotNull(r.Metrics!.Tuned);
+        Assert.Contains("lost on unseen data", r.Reason);
+    }
+
+    [Fact]
+    public void RejectsWhenTestHadTooFewDips()
+    {
+        var r = Screener.Screen("XBTUSD", Tick(), WinningFast(), Hourly(_ => 100m), new ResearchOptions { MinSimTrades = 1, MinTestTrades = 3 });
+        Assert.False(r.Approved);
+        Assert.Contains("too few dips to judge on unseen data", r.Reason);
     }
 
     [Fact]
     public void Rank_KeepsTopApprovals_AndDemotesTheRest()
     {
         ScreenResult Ok(string a, decimal net) => new(a, true, 0.5m, "ok",
-            new ScreenMetrics(1, 0, 0, null, null, null, null, "flat", new SimMetrics(1, 1, 0, 0, 100, 67, net, 10, 60)));
+            new ScreenMetrics(1, 0, 0, null, null, null, null, "flat", new SimMetrics(1, 1, 0, 0, 0, 100, 67, net, 10, 60)));
         var ranked = Screener.Rank([Ok("A", 0.1m), Ok("B", 0.5m), Ok("C", 0.3m), ScreenResult.Failed("D", "bad")], 2);
 
         Assert.Equal(["B", "C"], ranked.Where(r => r.Approved).Select(r => r.Asset));

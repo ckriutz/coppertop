@@ -135,7 +135,7 @@ public class OpportunityContextTests
     [Fact]
     public void Context_CarriesPredictionNewsAndSettings()
     {
-        var sim = new Coppertop.Research.Screening.SimMetrics(5, 4, 1, 0, 80m, 73m, 0.4m, 120m, 60m);
+        var sim = new Coppertop.Research.Screening.SimMetrics(5, 4, 1, 0, 0, 80m, 73m, 0.4m, 120m, 60m);
         var metrics = new Coppertop.Research.Screening.ScreenMetrics(100m, 0.05m, 5_000_000m, -1m, 3m, 31.5m, 0.8m, "up", sim);
         var r = new Coppertop.Research.Screening.ScreenResult("ETHUSD", true, 0.42m, "ok", metrics);
         var ctx = Worker.OpportunityContext(r, new NewsOutcome(NewsStatus.Clear, "quiet"), DateTimeOffset.UnixEpoch, new ResearchOptions());
@@ -145,5 +145,24 @@ public class OpportunityContextTests
         Assert.Equal(31.5m, json.GetProperty("screen").GetProperty("rsi14").GetDecimal());
         Assert.Equal("clear", json.GetProperty("news").GetProperty("status").GetString());
         Assert.Equal(1.5m, json.GetProperty("replay").GetProperty("takeProfitPct").GetDecimal());
+        Assert.False(json.GetProperty("replay").GetProperty("tuned").GetBoolean());
+    }
+
+    [Fact]
+    public void Plan_UsesTunedSetting_WhenPresent()
+    {
+        var sim = new Coppertop.Research.Screening.SimMetrics(5, 4, 1, 0, 0, 80m, 73m, 0.4m, 120m, 60m);
+        var tuned = new Coppertop.Research.Screening.TunedMetrics(15, 20, 2.5m, 2.0m, 3.0m, 12, 240, sim, sim);
+        var metrics = new Coppertop.Research.Screening.ScreenMetrics(100m, 0.05m, 5_000_000m, -1m, 3m, 31.5m, 0.8m, "up", sim, tuned);
+        var r = new Coppertop.Research.Screening.ScreenResult("ETHUSD", true, 0.42m, "ok", metrics);
+
+        var (tp, sl, signal) = Worker.Plan(r, new ResearchOptions());
+        Assert.Equal((2.0m, 3.0m), (tp, sl));
+        Assert.Equal(new Coppertop.Research.Api.SignalDto(15, 20, 2.5m, 720), signal);
+
+        var json = System.Text.Json.JsonSerializer.SerializeToElement(Worker.OpportunityContext(r, null, DateTimeOffset.UnixEpoch, new ResearchOptions()),
+            new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web));
+        Assert.True(json.GetProperty("replay").GetProperty("tuned").GetBoolean());
+        Assert.Equal(720, json.GetProperty("replay").GetProperty("maxHoldMinutes").GetInt32());
     }
 }

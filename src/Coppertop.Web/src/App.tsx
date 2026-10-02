@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
   loadDashboard, requestFlatten, setEntriesPaused,
-  type Account, type AccountBalance, type EntryAnalysis, type ScreenResult, type Control, type Dashboard, type Mark, type Opportunity, type Order, type Position, type Stats, type TokenUsage, type Trade, type Veto,
+  type Account, type AccountBalance, type EntryAnalysis, type ScreenResult, type SimMetrics, type Control, type Dashboard, type Mark, type Opportunity, type Order, type Position, type Stats, type TokenUsage, type Trade, type Veto,
 } from './api'
 import { ago, money, num, pct, signClass, time, until } from './format'
 import { Table, type Column } from './Table'
@@ -389,6 +389,18 @@ const opportunityColumns = (now: number): Column<Opportunity>[] => [
   { header: 'Strategy', cell: (o) => o.strategy },
   { header: 'Max entry', cell: (o) => num(o.maxEntryPrice), align: 'right' },
   { header: 'TP / SL', cell: (o) => `+${pct(o.takeProfitPct)} / −${pct(o.stopLossPct)}`, align: 'right' },
+  {
+    header: 'Signal',
+    cell: (o) =>
+      o.bandStdDevs == null ? (
+        <span className="muted">defaults</span>
+      ) : (
+        <span title={`SMA ${o.smaPeriod} on ${o.candleIntervalMinutes}m candles`}>
+          {o.bandStdDevs}σ · {o.maxHoldMinutes ? `${minutes(o.maxHoldMinutes)} max` : 'no time stop'}
+        </span>
+      ),
+    align: 'right',
+  },
   { header: 'Max spend', cell: (o) => money(o.maxSpendUsd), align: 'right' },
   { header: 'Confidence', cell: (o) => pct(o.confidence * 100, 0), align: 'right' },
   { header: 'Expires in', cell: (o) => <span title={time(o.expiresAt)}>{until(o.expiresAt, now)}</span> },
@@ -463,9 +475,11 @@ function ResearchPanel({ rows, now }: { rows: ScreenResult[]; now: number }) {
   return (
     <>
       <p className="muted">
-        Screened {ago(at, now)}. Each asset is checked for spread, volume, crash and trend, then the Trader's dip strategy is
-        replayed on the last {hours ? `${hours.toFixed(0)}h` : ''} of 5-minute candles after fees. Only assets whose replay made money
-        are approved. Confidence is the win rate we can be 95% sure of.
+        Screened {ago(at, now)}. Each asset is checked for spread, volume, crash and trend, then the dip strategy is tuned per coin
+        over the last {hours ? `${hours.toFixed(0)}h` : ''} of 15-minute candles: every take-profit / stop-loss / band / time-stop
+        combination is tried on the older ~2/3 (train), and the best one is replayed on the newer ~1/3 it never saw (test). Only
+        assets whose tuned setting also made money on the test part, after fees, are approved. Confidence is the win rate we can be
+        95% sure of over the whole period.
       </p>
       <Table rows={rows} columns={screenColumns} rowKey={(r) => r.asset} empty="" />
     </>
@@ -475,24 +489,49 @@ function ResearchPanel({ rows, now }: { rows: ScreenResult[]; now: number }) {
 const pctCell = (v: number | null | undefined, digits = 1) =>
   v == null ? '—' : <span className={signClass(v)}>{v > 0 ? '+' : ''}{v.toFixed(digits)}%</span>
 
+const resolved = (s: SimMetrics) => s.wins + s.losses + (s.timeStops ?? 0)
+const record = (s: SimMetrics) => (s.timeStops ? `${s.wins}/${s.losses}/${s.timeStops}` : `${s.wins}/${s.losses}`)
+const simCell = (s: SimMetrics | null | undefined) =>
+  !s ? (
+    '—'
+  ) : (
+    <span title={`${s.hours.toFixed(0)}h: wins / losses${s.timeStops ? ' / time stops' : ''}, avg net per trade after fees`}>
+      {record(s)} {resolved(s) > 0 ? pctCell(s.avgNetPct, 2) : ''}
+    </span>
+  )
+
 const screenColumns: Column<ScreenResult>[] = [
   { header: 'Verdict', cell: (r) => (r.approved ? <span className="badge ok small">approved</span> : <span className="badge no small">rejected</span>) },
   { header: 'Asset', cell: (r) => <strong>{r.asset}</strong> },
   { header: 'Confidence', cell: (r) => pct(r.confidence * 100, 0), align: 'right' },
   {
-    header: 'Replay W/L',
+    header: 'Tuned setting',
+    cell: (r) => {
+      const t = r.metrics?.tuned
+      if (!t) return <span className="muted">{r.metrics?.sim ? 'none passed' : '—'}</span>
+      return (
+        <span title={`best of ${t.combosTested} settings on the training candles; SMA ${t.smaPeriod} on ${t.candleIntervalMinutes}m`}>
+          +{t.takeProfitPct}% / −{t.stopLossPct}% · {t.bandStdDevs}σ · {t.maxHoldHours ? `${t.maxHoldHours}h` : '∞'}
+        </span>
+      )
+    },
+  },
+  { header: 'Train', cell: (r) => simCell(r.metrics?.tuned?.train), align: 'right' },
+  { header: 'Test (unseen)', cell: (r) => simCell(r.metrics?.tuned?.test), align: 'right' },
+  {
+    header: 'All W/L/T',
     cell: (r) => {
       const s = r.metrics?.sim
       if (!s) return '—'
       return (
         <span title={`${s.trades} trades (${s.open} still open) over ${s.hours.toFixed(0)}h; break-even needs ${s.breakevenWinRatePct.toFixed(0)}% wins`}>
-          {s.wins}/{s.losses} {s.winRatePct == null ? '' : <span className="muted">({s.winRatePct.toFixed(0)}% vs {s.breakevenWinRatePct.toFixed(0)}%)</span>}
+          {record(s)} {s.winRatePct == null ? '' : <span className="muted">({s.winRatePct.toFixed(0)}% vs {s.breakevenWinRatePct.toFixed(0)}%)</span>}
         </span>
       )
     },
     align: 'right',
   },
-  { header: 'Avg net', cell: (r) => (r.metrics?.sim && r.metrics.sim.wins + r.metrics.sim.losses > 0 ? pctCell(r.metrics.sim.avgNetPct, 2) : '—'), align: 'right' },
+  { header: 'Avg net', cell: (r) => (r.metrics?.sim && resolved(r.metrics.sim) > 0 ? pctCell(r.metrics.sim.avgNetPct, 2) : '—'), align: 'right' },
   { header: 'Avg hold', cell: (r) => (r.metrics?.sim?.avgHoldMinutes ? minutes(r.metrics.sim.avgHoldMinutes) : '—'), align: 'right' },
   { header: 'Spread', cell: (r) => (r.metrics ? pct(r.metrics.spreadPct, 3) : '—'), align: 'right' },
   { header: '24h vol', cell: (r) => (r.metrics ? compactUsd(r.metrics.volume24hUsd) : '—'), align: 'right' },
@@ -507,8 +546,10 @@ const compactUsd = (v: number) => new Intl.NumberFormat('en-US', { style: 'curre
 
 const isClosed = (e: EntryAnalysis) => e.outcome === 'win' || e.outcome === 'loss'
 const isFilled = (e: EntryAnalysis) => e.positionId != null
-const predictedNet = (e: EntryAnalysis) => e.opportunityContext?.screen?.sim?.avgNetPct ?? null
-const predictedWin = (e: EntryAnalysis) => e.opportunityContext?.screen?.sim?.winRatePct ?? null
+// The tuned setting's unseen-data result is the honest prediction; older entries only have the full replay.
+const predictedSim = (e: EntryAnalysis) => e.opportunityContext?.screen?.tuned?.test ?? e.opportunityContext?.screen?.sim
+const predictedNet = (e: EntryAnalysis) => predictedSim(e)?.avgNetPct ?? null
+const predictedWin = (e: EntryAnalysis) => predictedSim(e)?.winRatePct ?? null
 
 function avg(values: (number | null | undefined)[]): number | null {
   const v = values.filter((x): x is number => x != null)

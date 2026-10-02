@@ -99,9 +99,10 @@ public sealed class Worker(
 
         foreach (var r in ranked.Where(r => r.Approved))
         {
+            var plan = Plan(r, o);
             var opp = await api.PublishOpportunityAsync(new CreateOpportunityDto(
-                r.Asset, Strategy, r.Metrics!.LastPrice, o.TakeProfitPct, o.StopLossPct, o.MaxSpendUsd,
-                r.Confidence, r.Reason, expires, OpportunityContext(r, news.GetValueOrDefault(r.Asset), screenedAt, o)), ct);
+                r.Asset, Strategy, r.Metrics!.LastPrice, plan.TakeProfitPct, plan.StopLossPct, o.MaxSpendUsd,
+                r.Confidence, r.Reason, expires, OpportunityContext(r, news.GetValueOrDefault(r.Asset), screenedAt, o), plan.Signal), ct);
             if (opp is null)
             {
                 log.LogInformation("{Asset}: approved but vetoed, not published", r.Asset);
@@ -193,17 +194,29 @@ public sealed class Worker(
     /// What Research knew when it published: the screen metrics (incl. the replay's prediction), the news verdict
     /// and the settings the replay used. Stored with the opportunity so trades can be compared with predictions.
     /// </summary>
-    public static object OpportunityContext(ScreenResult r, NewsOutcome? news, DateTimeOffset screenedAt, ResearchOptions o) => new
+    public static object OpportunityContext(ScreenResult r, NewsOutcome? news, DateTimeOffset screenedAt, ResearchOptions o)
     {
-        version = 1,
-        screenedAt,
-        confidence = r.Confidence,
-        screen = r.Metrics,
-        news = news is null ? null : new { status = news.Status.ToString().ToLowerInvariant(), reason = news.Reason },
-        replay = new
+        var plan = Plan(r, o);
+        return new
         {
-            o.CandleIntervalMinutes, o.SmaPeriod, o.BandStdDevs, o.TakeProfitPct, o.StopLossPct,
-            o.MakerFeePct, o.TakerFeePct, o.StopLossSlippagePct,
-        },
-    };
+            version = 2,
+            screenedAt,
+            confidence = r.Confidence,
+            screen = r.Metrics,
+            news = news is null ? null : new { status = news.Status.ToString().ToLowerInvariant(), reason = news.Reason },
+            replay = new
+            {
+                tuned = r.Metrics?.Tuned is not null,
+                plan.Signal.CandleIntervalMinutes, plan.Signal.SmaPeriod, plan.Signal.BandStdDevs, plan.Signal.MaxHoldMinutes,
+                plan.TakeProfitPct, plan.StopLossPct,
+                o.MakerFeePct, o.TakerFeePct, o.StopLossSlippagePct, o.TuneTrainFraction,
+            },
+        };
+    }
+
+    /// <summary>The exits and signal to publish: the tuned setting when there is one, else the configured defaults.</summary>
+    public static (decimal TakeProfitPct, decimal StopLossPct, SignalDto Signal) Plan(ScreenResult r, ResearchOptions o) =>
+        r.Metrics?.Tuned is { } t
+            ? (t.TakeProfitPct, t.StopLossPct, new SignalDto(t.CandleIntervalMinutes, t.SmaPeriod, t.BandStdDevs, t.MaxHoldHours * 60))
+            : (o.TakeProfitPct, o.StopLossPct, new SignalDto(o.CandleIntervalMinutes, o.SmaPeriod, o.BandStdDevs, null));
 }

@@ -81,6 +81,27 @@ public sealed class ApiTests : IDisposable
     }
 
     [Fact]
+    public async Task OpportunitySignal_RoundTrips_AndIsOptional()
+    {
+        var tuned = await CreateOpp(Opp() with { Signal = new OpportunitySignal(15, 20, 2.0m, 720) });
+        Assert.Equal(15, tuned.CandleIntervalMinutes);
+        Assert.Equal(2.0m, tuned.BandStdDevs);
+        Assert.Equal(720, tuned.MaxHoldMinutes);
+
+        var plain = await CreateOpp(Opp("ETHUSD"));
+        Assert.Null(plain.CandleIntervalMinutes);
+        Assert.Null(plain.MaxHoldMinutes);
+
+        var active = await Active();
+        Assert.Equal(20, active.Single(o => o.Id == tuned.Id).SmaPeriod);
+        var byId = await _client.GetFromJsonAsync<Opportunity>($"/opportunities/{tuned.Id}");
+        Assert.Equal(720, byId!.MaxHoldMinutes);
+
+        var bad = await _client.PostAsJsonAsync("/opportunities", Opp() with { Signal = new OpportunitySignal(7, 20, 2m, 0) });
+        Assert.Equal(HttpStatusCode.BadRequest, bad.StatusCode);
+    }
+
+    [Fact]
     public async Task InvalidOpportunity_Returns400()
     {
         var res = await _client.PostAsJsonAsync("/opportunities", Opp() with { TakeProfitPct = 0, Confidence = 2 });
@@ -236,6 +257,21 @@ public sealed class ApiTests : IDisposable
         Assert.Equal("take_profit", fill.Position.CloseReason);
         Assert.Equal(0.09962m, fill.Position.RealizedPnlUsd!.Value, 5);
         Assert.Equal(2, (await _client.GetFromJsonAsync<List<Trade>>("/trades"))!.Count);
+    }
+
+    [Fact]
+    public async Task TimeStopSell_ClosesPosition_WithTimeStopReason()
+    {
+        var entry = await CreateOrder("buy", "entry");
+        var opened = (await (await _client.PostAsJsonAsync($"/orders/{entry.Id}/fill",
+            new FillOrderRequest(50000m, 0.0002m, 0.025m, null, 50750m, 49000m, null)))
+            .Content.ReadFromJsonAsync<FillOrderResponse>())!;
+
+        var exit = await CreateOrder("sell", "time_stop", opened.Position.Id, 49900m);
+        var fill = (await (await _client.PostAsJsonAsync($"/orders/{exit.Id}/fill",
+            new FillOrderRequest(49900m, 0.0002m, 0.04m, null, null, null, null)))
+            .Content.ReadFromJsonAsync<FillOrderResponse>())!;
+        Assert.Equal("time_stop", fill.Position.CloseReason);
     }
 
     [Fact]

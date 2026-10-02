@@ -12,6 +12,16 @@ public sealed record EntryPlan(
     string Rationale,
     DipSignal? Signal = null);
 
+/// <summary>Signal settings for one opportunity: Research's tuned values, else the Trader's defaults.</summary>
+public sealed record SignalSettings(int CandleIntervalMinutes, int SmaPeriod, decimal BandStdDevs, int? MaxHoldMinutes)
+{
+    public static SignalSettings For(OpportunityDto? opp, TraderOptions o) => new(
+        opp?.CandleIntervalMinutes ?? o.CandleIntervalMinutes,
+        opp?.SmaPeriod ?? o.SmaPeriod,
+        opp?.BandStdDevs ?? o.BandStdDevs,
+        opp is { CandleIntervalMinutes: not null } ? opp.MaxHoldMinutes : (o.MaxHoldMinutes > 0 ? o.MaxHoldMinutes : null));
+}
+
 /// <summary>The band the entry was measured against, kept for the entry's recorded context.</summary>
 public sealed record DipSignal(decimal Sma, decimal StdDev, decimal Band);
 
@@ -24,7 +34,8 @@ public sealed record PortfolioState(decimal AvailableCashUsd, int OpenPositions,
 
 /// <summary>
 /// Mean-reversion "buy the dip": enter with a post-only limit at the bid when the ask
-/// is below SMA - k·σ, and exit at +TP% (maker) or -SL% (taker). Pure function, no I/O.
+/// is below SMA - k·σ, and exit at +TP% (maker), -SL% (taker) or after the time stop (taker).
+/// k, the SMA period and candle size come from the opportunity when Research tuned them. Pure function, no I/O.
 /// </summary>
 public static class DipStrategy
 {
@@ -49,11 +60,12 @@ public static class DipStrategy
         if (portfolio.OpenPositions >= o.MaxOpenPositions)
             return EntryDecision.Skip($"max open positions ({o.MaxOpenPositions}) reached");
 
-        if (closes.Count < o.SmaPeriod)
-            return EntryDecision.Skip($"not enough candles ({closes.Count}/{o.SmaPeriod})");
+        var signal = SignalSettings.For(opportunity, o);
+        if (closes.Count < signal.SmaPeriod)
+            return EntryDecision.Skip($"not enough candles ({closes.Count}/{signal.SmaPeriod})");
 
-        var (sma, sd) = Indicators.SmaAndStdDev(closes, o.SmaPeriod);
-        var band = sma - o.BandStdDevs * sd;
+        var (sma, sd) = Indicators.SmaAndStdDev(closes, signal.SmaPeriod);
+        var band = sma - signal.BandStdDevs * sd;
         if (ticker.Ask > band)
             return EntryDecision.Skip($"ask {ticker.Ask} above dip band {band:F8} (sma {sma:F8})");
 

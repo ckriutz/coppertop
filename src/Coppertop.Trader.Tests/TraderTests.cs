@@ -69,6 +69,20 @@ public class DipStrategyTests
     }
 
     [Fact]
+    public void UsesTheOpportunitysTunedBand_OverTraderDefaults()
+    {
+        // k = 0.5 → band ≈ 99.1, so an ask of 99.0 is a dip for this opportunity but not with the default k = 1.
+        var tuned = Opp() with { CandleIntervalMinutes = 15, SmaPeriod = 5, BandStdDevs = 0.5m, MaxHoldMinutes = 240 };
+        var ticker = new Ticker("XBTUSD", 99.0m, 98.95m, 99m);
+        Assert.NotNull(DipStrategy.Evaluate(tuned, ticker, Closes, Pair, Empty, Options).Plan);
+        Assert.Null(DipStrategy.Evaluate(Opp(), ticker, Closes, Pair, Empty, Options).Plan);
+
+        Assert.Equal(new SignalSettings(15, 5, 0.5m, 240), SignalSettings.For(tuned, Options));
+        Assert.Equal(new SignalSettings(15, 5, 1m, null), SignalSettings.For(Opp(), new TraderOptions { SmaPeriod = 5, BandStdDevs = 1m }));
+        Assert.Equal(90, SignalSettings.For(null, new TraderOptions { MaxHoldMinutes = 90 }).MaxHoldMinutes);
+    }
+
+    [Fact]
     public void Skips_WhenAskAboveBand() =>
         Assert.Null(DipStrategy.Evaluate(Opp(), new Ticker("XBTUSD", 99.0m, 98.95m, 99m), Closes, Pair, Empty, Options).Plan);
 
@@ -170,6 +184,16 @@ public class PaperFillTests
     {
         var fill = PaperFlatten.Exit(Quote(100m), T0, 0.1m, 1);
         Assert.Equal("flatten", fill.Reason);
+        Assert.Equal(99.9m, fill.Price);
+    }
+
+    [Fact]
+    public void TimeStop_SellsAtBidLessSlippage_OnlyOnceHeldLongEnough()
+    {
+        Assert.Null(PaperTimeStop.Exit(Position(), Quote(100m), T0.AddMinutes(59), 60, 0.1m, 1));
+        Assert.Null(PaperTimeStop.Exit(Position(), Quote(100m), T0.AddHours(5), null, 0.1m, 1));
+        var fill = PaperTimeStop.Exit(Position(), Quote(100m), T0.AddMinutes(60), 60, 0.1m, 1);
+        Assert.Equal("time_stop", fill!.Reason);
         Assert.Equal(99.9m, fill.Price);
     }
 
@@ -369,6 +393,8 @@ public class EntryContextTests
         Assert.Equal(45m, json.GetProperty("opportunityAgeMinutes").GetDecimal());
         Assert.Equal(Math.Round((97m / 108m - 1m) * 100m, 4), json.GetProperty("change1hPct").GetDecimal()); // close 12 candles back = 108
         Assert.Equal(0.7m, json.GetProperty("opportunityConfidence").GetDecimal());
+        Assert.False(json.GetProperty("tunedSignal").GetBoolean());
+        Assert.Equal(5, json.GetProperty("candleIntervalMinutes").GetInt32());
     }
 
     [Fact]

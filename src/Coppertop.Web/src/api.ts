@@ -76,6 +76,11 @@ export interface Opportunity {
   status: string
   createdAt: string
   expiresAt: string
+  /** Research's tuned signal settings; null on opportunities published before tuning. */
+  candleIntervalMinutes: number | null
+  smaPeriod: number | null
+  bandStdDevs: number | null
+  maxHoldMinutes: number | null
 }
 
 export interface Veto {
@@ -166,6 +171,8 @@ export interface SimMetrics {
   trades: number
   wins: number
   losses: number
+  /** Sold by the time stop; missing on screens from before tuning. */
+  timeStops?: number
   open: number
   winRatePct: number | null
   breakevenWinRatePct: number
@@ -183,7 +190,22 @@ export interface ScreenMetrics {
   rsi14: number | null
   atrPct: number | null
   trend: string
+  /** The chosen (tuned) setting replayed over the whole period, or the default setting when nothing passed training. */
   sim: SimMetrics | null
+  /** Per-coin tuning: the setting that won on the older candles, and how it did on the newer ones it never saw. */
+  tuned?: TunedMetrics | null
+}
+
+export interface TunedMetrics {
+  candleIntervalMinutes: number
+  smaPeriod: number
+  bandStdDevs: number
+  takeProfitPct: number
+  stopLossPct: number
+  maxHoldHours: number | null
+  combosTested: number
+  train: SimMetrics
+  test: SimMetrics
 }
 
 /** Research's latest verdict for one watchlist asset. */

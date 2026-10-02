@@ -74,6 +74,19 @@ public static class PaperFills
     }
 }
 
+/// <summary>Time stop: a position held MaxHoldMinutes without hitting TP or SL is market-sold at the bid less slippage.</summary>
+public static class PaperTimeStop
+{
+    public static PaperFill? Exit(PositionDto position, Ticker? ticker, DateTimeOffset now, int? maxHoldMinutes, decimal slippagePct, int priceDecimals)
+    {
+        if (maxHoldMinutes is not > 0 || ticker is null) return null;
+        var held = now - position.OpenedAt;
+        if (held < TimeSpan.FromMinutes(maxHoldMinutes.Value)) return null;
+        var price = Math.Round(ticker.Bid * (1m - slippagePct / 100m), priceDecimals, MidpointRounding.ToZero);
+        return new PaperFill("time_stop", price, now, $"held {held.TotalMinutes:F0} min >= {maxHoldMinutes} min, bid {ticker.Bid}");
+    }
+}
+
 /// <summary>Kill-switch exit: taker market sell at the bid less slippage.</summary>
 public static class PaperFlatten
 {

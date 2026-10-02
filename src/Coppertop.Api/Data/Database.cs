@@ -196,6 +196,16 @@ public sealed class Database
             context     TEXT    NOT NULL,
             created_at  TEXT    NOT NULL
         );
+
+        -- Per-opportunity entry/exit signal settings chosen by Research's tuner (band width, candle size, time stop).
+        -- The Trader falls back to its own settings when an opportunity has no row here.
+        CREATE TABLE IF NOT EXISTS opportunity_signal (
+            opportunity_id           INTEGER PRIMARY KEY REFERENCES opportunities(id),
+            candle_interval_minutes  INTEGER NOT NULL,
+            sma_period               INTEGER NOT NULL,
+            band_std_devs            REAL    NOT NULL,
+            max_hold_minutes         INTEGER
+        );
         """;
 
     private sealed class DateTimeOffsetHandler : SqlMapper.TypeHandler<DateTimeOffset>

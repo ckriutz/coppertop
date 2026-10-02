@@ -41,7 +41,16 @@ public sealed class Opportunity
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset ExpiresAt { get; set; }
     public DateTimeOffset? ClosedAt { get; set; }
+
+    // From opportunity_signal; null when Research didn't send tuned signal settings.
+    public int? CandleIntervalMinutes { get; set; }
+    public int? SmaPeriod { get; set; }
+    public decimal? BandStdDevs { get; set; }
+    public int? MaxHoldMinutes { get; set; }
 }
+
+/// <summary>Tuned signal settings for one opportunity. MaxHoldMinutes null means no time stop.</summary>
+public sealed record OpportunitySignal(int CandleIntervalMinutes, int SmaPeriod, decimal BandStdDevs, int? MaxHoldMinutes);
 
 public sealed record CreateOpportunityRequest(
     string Asset,
@@ -53,7 +62,8 @@ public sealed record CreateOpportunityRequest(
     decimal Confidence,
     string Reason,
     DateTimeOffset ExpiresAt,
-    System.Text.Json.JsonElement? Context = null);
+    System.Text.Json.JsonElement? Context = null,
+    OpportunitySignal? Signal = null);
 
 public sealed class Veto
 {

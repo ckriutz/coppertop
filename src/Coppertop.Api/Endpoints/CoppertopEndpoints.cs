@@ -177,6 +177,11 @@ public static class CoppertopEndpoints
 
     private static bool IsUsd(AccountBalance b) => b.Asset.Split('.')[0] is "ZUSD" or "USD";
 
+    private const string OpportunitySelect = """
+        SELECT o.*, s.candle_interval_minutes, s.sma_period, s.band_std_devs, s.max_hold_minutes
+        FROM opportunities o LEFT JOIN opportunity_signal s ON s.opportunity_id = o.id
+        """;
+
     private static void MapOpportunities(WebApplication app)
     {
         var group = app.MapGroup("/opportunities");
@@ -186,15 +191,15 @@ public static class CoppertopEndpoints
             using var c = db.Open();
             ExpireOpportunities(c, clock.GetUtcNow());
             var sql = active == true
-                ? "SELECT * FROM opportunities WHERE status = @status ORDER BY confidence DESC, id DESC"
-                : "SELECT * FROM opportunities ORDER BY id DESC LIMIT 500";
+                ? $"{OpportunitySelect} WHERE status = @status ORDER BY confidence DESC, id DESC"
+                : $"{OpportunitySelect} ORDER BY id DESC LIMIT 500";
             return Results.Ok(c.Query<Opportunity>(sql, new { status = OpportunityStatus.Active }));
         });
 
         group.MapGet("/{id:long}", (Database db, long id) =>
         {
             using var c = db.Open();
-            var item = c.QuerySingleOrDefault<Opportunity>("SELECT * FROM opportunities WHERE id = @id", new { id });
+            var item = c.QuerySingleOrDefault<Opportunity>($"{OpportunitySelect} WHERE id = @id", new { id });
             return item is null ? Results.NotFound() : Results.Ok(item);
         });
 
@@ -239,9 +244,14 @@ public static class CoppertopEndpoints
             if (ContextJson(req.Context) is { } context)
                 c.Execute("INSERT INTO opportunity_context (opportunity_id, context, created_at) VALUES (@id, @context, @now)",
                     new { id, context, now = Database.Ts(now) }, tx);
+            if (req.Signal is { } signal)
+                c.Execute("""
+                    INSERT INTO opportunity_signal (opportunity_id, candle_interval_minutes, sma_period, band_std_devs, max_hold_minutes)
+                    VALUES (@id, @CandleIntervalMinutes, @SmaPeriod, @BandStdDevs, @MaxHoldMinutes)
+                    """, new { id, signal.CandleIntervalMinutes, signal.SmaPeriod, signal.BandStdDevs, signal.MaxHoldMinutes }, tx);
             tx.Commit();
 
-            var created = c.QuerySingle<Opportunity>("SELECT * FROM opportunities WHERE id = @id", new { id });
+            var created = c.QuerySingle<Opportunity>($"{OpportunitySelect} WHERE id = @id", new { id });
             return Results.Created($"/opportunities/{id}", created);
         });
 
@@ -266,7 +276,7 @@ public static class CoppertopEndpoints
             var exists = c.ExecuteScalar<long>("SELECT COUNT(*) FROM opportunities WHERE id = @id", new { id }) > 0;
             return exists ? Results.Conflict(new { error = "Opportunity is not active." }) : Results.NotFound();
         }
-        return Results.Ok(c.QuerySingle<Opportunity>("SELECT * FROM opportunities WHERE id = @id", new { id }));
+        return Results.Ok(c.QuerySingle<Opportunity>($"{OpportunitySelect} WHERE id = @id", new { id }));
     }
 
     private static void ExpireOpportunities(System.Data.IDbConnection c, DateTimeOffset now) =>
